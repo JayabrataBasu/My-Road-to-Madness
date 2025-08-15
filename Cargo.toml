@@ -1,0 +1,10 @@
+[package]
+name = "conways_game_of_life"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pixels = "0.13"
+winit = "0.27.5"
+winit_input_helper = "0.13"
+rand = "0.8"
