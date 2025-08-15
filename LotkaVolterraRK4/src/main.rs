@@ -496,12 +496,30 @@ async fn main() {
         // Render graphics
         clear_background(LIGHTGRAY);
 
-        let top = 40.0;
-        let height = screen_height() - top - 20.0;
-        let width = (screen_width() - 300.0) / 2.0 - 20.0; // account for side panel ~250px
+        // Adjusted margins and plot area for better axis visibility
+        let left_margin = 50.0;
+        let top_margin = 60.0;
+        let right_margin = 320.0; // account for side panel and extra space
+        let bottom_margin = 40.0;
+        let plot_width = (screen_width() - left_margin - right_margin) / 2.0;
+        let plot_height = screen_height() - top_margin - bottom_margin;
 
-        draw_time_series(&sim, 10.0, screen_height() - 10.0, width, height, sim.zoom_level);
-        draw_phase_portrait(&sim, screen_width() / 2.0 + 10.0 - 125.0, screen_height() - 10.0, width, height, sim.zoom_level); // adjust for panel
+        draw_time_series(
+            &sim,
+            left_margin,
+            screen_height() - bottom_margin,
+            plot_width,
+            plot_height,
+            sim.zoom_level,
+        );
+        draw_phase_portrait(
+            &sim,
+            screen_width() / 2.0 + left_margin / 2.0,
+            screen_height() - bottom_margin,
+            plot_width,
+            plot_height,
+            sim.zoom_level,
+        );
 
         egui_macroquad::draw();
 
