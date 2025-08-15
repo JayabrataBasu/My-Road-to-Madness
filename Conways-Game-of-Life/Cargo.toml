@@ -1,0 +1,17 @@
+[package]
+name = "conways_game_of_life"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.28.1"
+egui = "0.28.1"
+egui_plot = "0.28.1"
+serde = { version = "1.0", features = ["derive"] }
+rand = "0.8.5"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
