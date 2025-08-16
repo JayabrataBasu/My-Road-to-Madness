@@ -1,5 +1,6 @@
 use eframe::egui;
-use egui::{ColorImage, TextureHandle, TextureOptions, Pos2, Vec2};
+use egui::{ColorImage, TextureHandle, TextureOptions, Vec2};
+use egui_plot::{Line, Plot, PlotPoints}; // <-- Use the egui_plot crate
 use rayon::prelude::*;
 use std::collections::VecDeque;
 use std::fs::File;
@@ -70,34 +71,34 @@ struct StatsPoint {
 struct GrayScottSim {
     width: usize,
     height: usize,
-    
+
     // Double buffering for simulation
     u_current: Vec<f32>,
     v_current: Vec<f32>,
     u_next: Vec<f32>,
     v_next: Vec<f32>,
-    
+
     // Simulation parameters
-    du: f32,    // Diffusion rate of U
-    dv: f32,    // Diffusion rate of V
-    feed: f32,  // Feed rate
-    kill: f32,  // Kill rate
-    dt: f32,    // Time step
-    
+    du: f32,   // Diffusion rate of U
+    dv: f32,   // Diffusion rate of V
+    feed: f32, // Feed rate
+    kill: f32, // Kill rate
+    dt: f32,   // Time step
+
     // Simulation state
     running: bool,
     time: f32,
     steps_per_frame: usize,
-    
+
     // Statistics
     stats_history: VecDeque<StatsPoint>,
-    
+
     // UI state
     texture: Option<TextureHandle>,
     mouse_painting: bool,
     paint_radius: f32,
     paint_strength: f32,
-    
+
     // Performance tracking
     last_frame_time: Instant,
     fps: f32,
@@ -108,7 +109,7 @@ impl GrayScottSim {
         let width = 256;
         let height = 256;
         let size = width * height;
-        
+
         let mut sim = Self {
             width,
             height,
@@ -132,22 +133,22 @@ impl GrayScottSim {
             last_frame_time: Instant::now(),
             fps: 0.0,
         };
-        
+
         sim.initialize_random();
         sim
     }
-    
+
     /// Initialize the grid with random noise in a small central region
     fn initialize_random(&mut self) {
         let size = self.width * self.height;
         self.u_current = vec![1.0; size];
         self.v_current = vec![0.0; size];
-        
+
         // Add some random V in a small central square
         let cx = self.width / 2;
         let cy = self.height / 2;
         let radius = 20.min(self.width / 8).min(self.height / 8);
-        
+
         for y in (cy.saturating_sub(radius))..=(cy + radius).min(self.height - 1) {
             for x in (cx.saturating_sub(radius))..=(cx + radius).min(self.width - 1) {
                 let idx = y * self.width + x;
@@ -157,51 +158,51 @@ impl GrayScottSim {
                 }
             }
         }
-        
+
         self.time = 0.0;
         self.stats_history.clear();
         self.update_statistics();
     }
-    
+
     /// Resize the simulation grid
     fn resize(&mut self, new_width: usize, new_height: usize) {
         if new_width == self.width && new_height == self.height {
             return;
         }
-        
+
         let new_size = new_width * new_height;
-        
+
         // Create new grids
         let mut new_u = vec![1.0; new_size];
         let mut new_v = vec![0.0; new_size];
-        
+
         // Copy existing data with scaling
         let scale_x = self.width as f32 / new_width as f32;
         let scale_y = self.height as f32 / new_height as f32;
-        
+
         for y in 0..new_height {
             for x in 0..new_width {
                 let old_x = ((x as f32 * scale_x) as usize).min(self.width - 1);
                 let old_y = ((y as f32 * scale_y) as usize).min(self.height - 1);
                 let old_idx = old_y * self.width + old_x;
                 let new_idx = y * new_width + x;
-                
+
                 new_u[new_idx] = self.u_current[old_idx];
                 new_v[new_idx] = self.v_current[old_idx];
             }
         }
-        
+
         self.width = new_width;
         self.height = new_height;
         self.u_current = new_u;
         self.v_current = new_v;
         self.u_next = vec![1.0; new_size];
         self.v_next = vec![0.0; new_size];
-        
+
         // Clear texture to force regeneration
         self.texture = None;
     }
-    
+
     /// Apply a preset configuration
     fn apply_preset(&mut self, preset: &Preset) {
         self.du = preset.du;
@@ -210,13 +211,13 @@ impl GrayScottSim {
         self.kill = preset.kill;
         self.dt = preset.dt;
     }
-    
+
     /// Get the index for a given coordinate
     #[inline]
     fn idx(&self, x: usize, y: usize) -> usize {
         y * self.width + x
     }
-    
+
     /// Get wrapped coordinates (periodic boundary conditions)
     #[inline]
     fn wrap_coords(&self, x: i32, y: i32) -> (usize, usize) {
@@ -224,66 +225,73 @@ impl GrayScottSim {
         let wy = ((y % self.height as i32 + self.height as i32) % self.height as i32) as usize;
         (wx, wy)
     }
-    
+
     /// Compute the Laplacian using a 5-point stencil
     #[inline]
     fn laplacian(&self, grid: &[f32], x: usize, y: usize) -> f32 {
         let center = grid[self.idx(x, y)];
-        
+
         let (x_left, _) = self.wrap_coords(x as i32 - 1, y as i32);
         let (x_right, _) = self.wrap_coords(x as i32 + 1, y as i32);
         let (_, y_up) = self.wrap_coords(x as i32, y as i32 - 1);
         let (_, y_down) = self.wrap_coords(x as i32, y as i32 + 1);
-        
+
         let left = grid[self.idx(x_left, y)];
         let right = grid[self.idx(x_right, y)];
         let up = grid[self.idx(x, y_up)];
         let down = grid[self.idx(x, y_down)];
-        
+
         left + right + up + down - 4.0 * center
     }
-    
+
     /// Perform one simulation step using forward Euler method
     fn step(&mut self) {
         let chunk_size = (self.height / rayon::current_num_threads()).max(1);
-        
-        // Process rows in parallel
-        self.u_next
+
+        // To avoid parallel mutable/immutable borrow, create temp buffers
+        let mut u_next = vec![0.0; self.width * self.height];
+        let mut v_next = vec![0.0; self.width * self.height];
+
+        u_next
             .par_chunks_mut(self.width * chunk_size)
-            .zip(self.v_next.par_chunks_mut(self.width * chunk_size))
+            .zip(v_next.par_chunks_mut(self.width * chunk_size))
             .enumerate()
             .for_each(|(chunk_idx, (u_chunk, v_chunk))| {
                 let start_row = chunk_idx * chunk_size;
                 let end_row = (start_row + chunk_size).min(self.height);
-                
+
                 for y in start_row..end_row {
                     for x in 0..self.width {
                         let local_idx = (y - start_row) * self.width + x;
-                        
+
                         let u = self.u_current[self.idx(x, y)];
                         let v = self.v_current[self.idx(x, y)];
-                        
+
                         let lapl_u = self.laplacian(&self.u_current, x, y);
                         let lapl_v = self.laplacian(&self.v_current, x, y);
-                        
+
                         let uvv = u * v * v;
-                        
+
                         let du_dt = self.du * lapl_u - uvv + self.feed * (1.0 - u);
                         let dv_dt = self.dv * lapl_v + uvv - (self.kill + self.feed) * v;
-                        
+
                         u_chunk[local_idx] = (u + self.dt * du_dt).clamp(0.0, 1.0);
                         v_chunk[local_idx] = (v + self.dt * dv_dt).clamp(0.0, 1.0);
                     }
                 }
             });
-        
+
+        // Copy temp buffers to the simulation state
+        self.u_next.copy_from_slice(&u_next);
+        self.v_next.copy_from_slice(&v_next);
+
         // Swap buffers
         std::mem::swap(&mut self.u_current, &mut self.u_next);
         std::mem::swap(&mut self.v_current, &mut self.v_next);
-        
+
         self.time += self.dt;
     }
-    
+
     /// Update simulation for multiple steps
     fn update(&mut self) {
         if self.running {
@@ -292,19 +300,20 @@ impl GrayScottSim {
             }
             self.update_statistics();
         }
-        
+
         // Update FPS
         let now = Instant::now();
         let frame_time = now.duration_since(self.last_frame_time).as_secs_f32();
         self.fps = 0.9 * self.fps + 0.1 / frame_time;
         self.last_frame_time = now;
     }
-    
+
     /// Calculate and store statistics
     fn update_statistics(&mut self) {
         let total_pixels = self.u_current.len() as f32;
-        
-        let (sum_u, sum_v, total_v): (f32, f32, f32) = self.u_current
+
+        let (sum_u, sum_v, total_v): (f32, f32, f32) = self
+            .u_current
             .par_iter()
             .zip(self.v_current.par_iter())
             .map(|(u, v)| (*u, *v, *v))
@@ -312,66 +321,68 @@ impl GrayScottSim {
                 || (0.0, 0.0, 0.0),
                 |acc, val| (acc.0 + val.0, acc.1 + val.1, acc.2 + val.2),
             );
-        
+
         let stats = StatsPoint {
             time: self.time,
             mean_u: sum_u / total_pixels,
             mean_v: sum_v / total_pixels,
             total_v,
         };
-        
+
         self.stats_history.push_back(stats);
-        
+
         if self.stats_history.len() > MAX_HISTORY {
             self.stats_history.pop_front();
         }
     }
-    
+
     /// Create texture from current simulation state
     fn update_texture(&mut self, ctx: &egui::Context) {
         let mut pixels = vec![egui::Color32::BLACK; self.width * self.height];
-        
-        pixels
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, pixel)| {
-                let u = self.u_current[i];
-                let v = self.v_current[i];
-                
-                // Color scheme: U as grayscale background, V as blue intensity
-                let gray = (u * 255.0) as u8;
-                let blue = (v * 255.0) as u8;
-                
-                *pixel = egui::Color32::from_rgb(gray.saturating_sub(blue), gray.saturating_sub(blue), gray.saturating_add(blue));
-            });
-        
+
+        pixels.par_iter_mut().enumerate().for_each(|(i, pixel)| {
+            let u = self.u_current[i];
+            let v = self.v_current[i];
+
+            // Color scheme: U as grayscale background, V as blue intensity
+            let gray = (u * 255.0) as u8;
+            let blue = (v * 255.0) as u8;
+
+            *pixel = egui::Color32::from_rgb(
+                gray.saturating_sub(blue),
+                gray.saturating_sub(blue),
+                gray.saturating_add(blue),
+            );
+        });
+
         let color_image = ColorImage {
             size: [self.width, self.height],
             pixels,
         };
-        
+
         if let Some(texture) = &mut self.texture {
             texture.set(color_image, TextureOptions::NEAREST);
         } else {
-            self.texture = Some(ctx.load_texture("simulation", color_image, TextureOptions::NEAREST));
+            self.texture =
+                Some(ctx.load_texture("simulation", color_image, TextureOptions::NEAREST));
         }
     }
-    
+
     /// Handle mouse interaction for painting
     fn handle_mouse_painting(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-        
+
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
-        
+
         if let Some(pos) = response.interact_pointer_pos() {
             if response.dragged() || response.clicked() {
                 // Convert screen coordinates to grid coordinates
                 let rel_pos = pos - rect.min;
                 let grid_x = (rel_pos.x / rect.width() * self.width as f32) as usize;
                 let grid_y = (rel_pos.y / rect.height() * self.height as f32) as usize;
-                
+
                 // Paint in a circular area
                 let radius = self.paint_radius as usize;
                 for dy in -(radius as i32)..=(radius as i32) {
@@ -380,26 +391,33 @@ impl GrayScottSim {
                         if distance <= self.paint_radius {
                             let (px, py) = self.wrap_coords(grid_x as i32 + dx, grid_y as i32 + dy);
                             let idx = self.idx(px, py);
-                            
-                            let strength = (1.0 - distance / self.paint_radius) * self.paint_strength;
-                            self.v_current[idx] = (self.v_current[idx] + strength * 0.5).clamp(0.0, 1.0);
-                            self.u_current[idx] = (self.u_current[idx] - strength * 0.25).clamp(0.0, 1.0);
+
+                            let strength =
+                                (1.0 - distance / self.paint_radius) * self.paint_strength;
+                            self.v_current[idx] =
+                                (self.v_current[idx] + strength * 0.5).clamp(0.0, 1.0);
+                            self.u_current[idx] =
+                                (self.u_current[idx] - strength * 0.25).clamp(0.0, 1.0);
                         }
                     }
                 }
             }
         }
     }
-    
+
     /// Export statistics to CSV file
     fn export_stats(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut file = File::create("gray_scott_stats.csv")?;
         writeln!(file, "Time,Mean_U,Mean_V,Total_V")?;
-        
+
         for stats in &self.stats_history {
-            writeln!(file, "{},{},{},{}", stats.time, stats.mean_u, stats.mean_v, stats.total_v)?;
+            writeln!(
+                file,
+                "{},{},{},{}",
+                stats.time, stats.mean_u, stats.mean_v, stats.total_v
+            )?;
         }
-        
+
         Ok(())
     }
 }
@@ -426,12 +444,12 @@ impl eframe::App for GrayScottApp {
         // Update simulation
         self.sim.update();
         self.sim.update_texture(ctx);
-        
+
         // Request continuous repaint when running
         if self.sim.running {
             ctx.request_repaint();
         }
-        
+
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -444,85 +462,102 @@ impl eframe::App for GrayScottApp {
                         }
                     }
                 });
-                
+
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_stats, "Show Statistics");
                 });
-                
+
                 ui.separator();
                 ui.label(format!("Time: {:.1}", self.sim.time));
                 ui.label(format!("FPS: {:.1}", self.sim.fps));
             });
         });
-        
-        egui::SidePanel::right("controls").resizable(true).show(ctx, |ui| {
-            ui.heading("Gray-Scott Simulation");
-            
-            ui.separator();
-            
-            // Control buttons
-            ui.horizontal(|ui| {
-                if ui.button(if self.sim.running { "⏸ Pause" } else { "▶ Run" }).clicked() {
-                    self.sim.running = !self.sim.running;
-                }
-                if ui.button("Step").clicked() {
-                    self.sim.step();
-                    self.sim.update_statistics();
-                }
-            });
-            
-            ui.separator();
-            
-            // Presets
-            ui.heading("Presets");
-            for (i, preset) in Preset::PRESETS.iter().enumerate() {
-                if ui.radio(self.selected_preset == i, preset.name).clicked() {
-                    self.selected_preset = i;
-                    if i != 3 { // Don't apply custom preset
-                        self.sim.apply_preset(preset);
+
+        egui::SidePanel::right("controls")
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.heading("Gray-Scott Simulation");
+
+                ui.separator();
+
+                // Control buttons
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(if self.sim.running {
+                            "⏸ Pause"
+                        } else {
+                            "▶ Run"
+                        })
+                        .clicked()
+                    {
+                        self.sim.running = !self.sim.running;
+                    }
+                    if ui.button("Step").clicked() {
+                        self.sim.step();
+                        self.sim.update_statistics();
+                    }
+                });
+
+                ui.separator();
+
+                // Presets
+                ui.heading("Presets");
+                for (i, preset) in Preset::PRESETS.iter().enumerate() {
+                    if ui.radio(self.selected_preset == i, preset.name).clicked() {
+                        self.selected_preset = i;
+                        if i != 3 {
+                            // Don't apply custom preset
+                            self.sim.apply_preset(preset);
+                        }
                     }
                 }
-            }
-            
-            ui.separator();
-            
-            // Parameters
-            ui.heading("Parameters");
-            ui.add(egui::Slider::new(&mut self.sim.du, 0.0..=0.5).text("Du (U diffusion)"));
-            ui.add(egui::Slider::new(&mut self.sim.dv, 0.0..=0.5).text("Dv (V diffusion)"));
-            ui.add(egui::Slider::new(&mut self.sim.feed, 0.0..=0.1).text("Feed rate"));
-            ui.add(egui::Slider::new(&mut self.sim.kill, 0.0..=0.1).text("Kill rate"));
-            ui.add(egui::Slider::new(&mut self.sim.dt, 0.1..=2.0).text("Time step"));
-            ui.add(egui::Slider::new(&mut self.sim.steps_per_frame, 1..=10).text("Steps/frame"));
-            
-            ui.separator();
-            
-            // Grid settings
-            ui.heading("Grid Settings");
-            let mut grid_size = self.sim.width;
-            ui.add(egui::Slider::new(&mut grid_size, 64..=1024).text("Grid size"));
-            if grid_size != self.sim.width {
-                self.sim.resize(grid_size, grid_size);
-            }
-            
-            ui.separator();
-            
-            // Painting settings
-            ui.heading("Painting");
-            ui.add(egui::Slider::new(&mut self.sim.paint_radius, 1.0..=50.0).text("Brush radius"));
-            ui.add(egui::Slider::new(&mut self.sim.paint_strength, 0.1..=2.0).text("Brush strength"));
-            
-            ui.separator();
-            
-            // Current statistics
-            if let Some(latest_stats) = self.sim.stats_history.back() {
-                ui.heading("Live Statistics");
-                ui.label(format!("Mean U: {:.4}", latest_stats.mean_u));
-                ui.label(format!("Mean V: {:.4}", latest_stats.mean_v));
-                ui.label(format!("Total V: {:.2}", latest_stats.total_v));
-            }
-        });
-        
+
+                ui.separator();
+
+                // Parameters
+                ui.heading("Parameters");
+                ui.add(egui::Slider::new(&mut self.sim.du, 0.0..=0.5).text("Du (U diffusion)"));
+                ui.add(egui::Slider::new(&mut self.sim.dv, 0.0..=0.5).text("Dv (V diffusion)"));
+                ui.add(egui::Slider::new(&mut self.sim.feed, 0.0..=0.1).text("Feed rate"));
+                ui.add(egui::Slider::new(&mut self.sim.kill, 0.0..=0.1).text("Kill rate"));
+                ui.add(egui::Slider::new(&mut self.sim.dt, 0.1..=2.0).text("Time step"));
+                ui.add(
+                    egui::Slider::new(&mut self.sim.steps_per_frame, 1..=10).text("Steps/frame"),
+                );
+
+                ui.separator();
+
+                // Grid settings
+                ui.heading("Grid Settings");
+                let mut grid_size = self.sim.width;
+                ui.add(egui::Slider::new(&mut grid_size, 64..=1024).text("Grid size"));
+                if grid_size != self.sim.width {
+                    self.sim.resize(grid_size, grid_size);
+                }
+
+                ui.separator();
+
+                // Painting settings
+                ui.heading("Painting");
+                ui.add(
+                    egui::Slider::new(&mut self.sim.paint_radius, 1.0..=50.0).text("Brush radius"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.sim.paint_strength, 0.1..=2.0)
+                        .text("Brush strength"),
+                );
+
+                ui.separator();
+
+                // Current statistics
+                if let Some(latest_stats) = self.sim.stats_history.back() {
+                    ui.heading("Live Statistics");
+                    ui.label(format!("Mean U: {:.4}", latest_stats.mean_u));
+                    ui.label(format!("Mean V: {:.4}", latest_stats.mean_v));
+                    ui.label(format!("Total V: {:.2}", latest_stats.total_v));
+                }
+            });
+
         // Statistics window
         if self.show_stats {
             egui::Window::new("Statistics")
@@ -530,30 +565,40 @@ impl eframe::App for GrayScottApp {
                 .default_size([400.0, 300.0])
                 .show(ctx, |ui| {
                     if self.sim.stats_history.len() > 1 {
-                        let points_u: Vec<[f64; 2]> = self.sim.stats_history
+                        let points_u: Vec<[f64; 2]> = self
+                            .sim
+                            .stats_history
                             .iter()
                             .map(|s| [s.time as f64, s.mean_u as f64])
                             .collect();
-                        
-                        let points_v: Vec<[f64; 2]> = self.sim.stats_history
+
+                        let points_v: Vec<[f64; 2]> = self
+                            .sim
+                            .stats_history
                             .iter()
                             .map(|s| [s.time as f64, s.mean_v as f64])
                             .collect();
-                        
-                        use egui::plot::{Line, Plot, PlotPoints};
-                        
+
                         Plot::new("statistics_plot")
                             .view_aspect(2.0)
                             .show(ui, |plot_ui| {
-                                plot_ui.line(Line::new(PlotPoints::from(points_u)).name("Mean U").color(egui::Color32::RED));
-                                plot_ui.line(Line::new(PlotPoints::from(points_v)).name("Mean V").color(egui::Color32::BLUE));
+                                plot_ui.line(
+                                    Line::new(PlotPoints::from(points_u))
+                                        .name("Mean U")
+                                        .color(egui::Color32::RED),
+                                );
+                                plot_ui.line(
+                                    Line::new(PlotPoints::from(points_v))
+                                        .name("Mean V")
+                                        .color(egui::Color32::BLUE),
+                                );
                             });
                     } else {
                         ui.label("Not enough data points for plot");
                     }
                 });
         }
-        
+
         // Main simulation display
         egui::CentralPanel::default().show(ctx, |ui| {
             let available = ui.available_size();
@@ -562,18 +607,20 @@ impl eframe::App for GrayScottApp {
                 ui.available_rect_before_wrap().center(),
                 Vec2::splat(size),
             );
-            
-            if let Some(texture) = &self.sim.texture {
+
+            // Fix mutable/immutable borrow: split block
+            let texture_id = self.sim.texture.as_ref().map(|t| t.id());
+            if let Some(texture_id) = texture_id {
                 ui.allocate_ui_at_rect(rect, |ui| {
-                    ui.image((texture.id(), rect.size()));
-                    self.sim.handle_mouse_painting(ui, rect);
+                    ui.image((texture_id, rect.size()));
                 });
+                self.sim.handle_mouse_painting(ui, rect);
             } else {
                 ui.allocate_ui_at_rect(rect, |ui| {
                     ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
                 });
             }
-            
+
             // Instructions
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.label("Click and drag to paint V chemical • Use controls on the right to adjust parameters");
@@ -582,17 +629,17 @@ impl eframe::App for GrayScottApp {
     }
 }
 
-fn main() -> eframe::Result {
+fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_title("Gray-Scott Reaction-Diffusion Simulation"),
         ..Default::default()
     };
-    
+
     eframe::run_native(
         "Gray-Scott Simulation",
         options,
-        Box::new(|cc| Ok(Box::new(GrayScottApp::new(cc)))),
+        Box::new(|cc| Box::new(GrayScottApp::new(cc))),
     )
 }
