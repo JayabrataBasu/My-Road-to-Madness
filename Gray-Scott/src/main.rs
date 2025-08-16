@@ -405,3 +405,194 @@ impl GrayScottSim {
 }
 
 /// Main application structure
+struct GrayScottApp {
+    sim: GrayScottSim,
+    selected_preset: usize,
+    show_stats: bool,
+}
+
+impl GrayScottApp {
+    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        Self {
+            sim: GrayScottSim::new(),
+            selected_preset: 3, // Start with "Custom"
+            show_stats: false,
+        }
+    }
+}
+
+impl eframe::App for GrayScottApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Update simulation
+        self.sim.update();
+        self.sim.update_texture(ctx);
+        
+        // Request continuous repaint when running
+        if self.sim.running {
+            ctx.request_repaint();
+        }
+        
+        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Reset Grid").clicked() {
+                        self.sim.initialize_random();
+                    }
+                    if ui.button("Export Statistics").clicked() {
+                        if let Err(e) = self.sim.export_stats() {
+                            eprintln!("Failed to export statistics: {}", e);
+                        }
+                    }
+                });
+                
+                ui.menu_button("View", |ui| {
+                    ui.checkbox(&mut self.show_stats, "Show Statistics");
+                });
+                
+                ui.separator();
+                ui.label(format!("Time: {:.1}", self.sim.time));
+                ui.label(format!("FPS: {:.1}", self.sim.fps));
+            });
+        });
+        
+        egui::SidePanel::right("controls").resizable(true).show(ctx, |ui| {
+            ui.heading("Gray-Scott Simulation");
+            
+            ui.separator();
+            
+            // Control buttons
+            ui.horizontal(|ui| {
+                if ui.button(if self.sim.running { "⏸ Pause" } else { "▶ Run" }).clicked() {
+                    self.sim.running = !self.sim.running;
+                }
+                if ui.button("Step").clicked() {
+                    self.sim.step();
+                    self.sim.update_statistics();
+                }
+            });
+            
+            ui.separator();
+            
+            // Presets
+            ui.heading("Presets");
+            for (i, preset) in Preset::PRESETS.iter().enumerate() {
+                if ui.radio(self.selected_preset == i, preset.name).clicked() {
+                    self.selected_preset = i;
+                    if i != 3 { // Don't apply custom preset
+                        self.sim.apply_preset(preset);
+                    }
+                }
+            }
+            
+            ui.separator();
+            
+            // Parameters
+            ui.heading("Parameters");
+            ui.add(egui::Slider::new(&mut self.sim.du, 0.0..=0.5).text("Du (U diffusion)"));
+            ui.add(egui::Slider::new(&mut self.sim.dv, 0.0..=0.5).text("Dv (V diffusion)"));
+            ui.add(egui::Slider::new(&mut self.sim.feed, 0.0..=0.1).text("Feed rate"));
+            ui.add(egui::Slider::new(&mut self.sim.kill, 0.0..=0.1).text("Kill rate"));
+            ui.add(egui::Slider::new(&mut self.sim.dt, 0.1..=2.0).text("Time step"));
+            ui.add(egui::Slider::new(&mut self.sim.steps_per_frame, 1..=10).text("Steps/frame"));
+            
+            ui.separator();
+            
+            // Grid settings
+            ui.heading("Grid Settings");
+            let mut grid_size = self.sim.width;
+            ui.add(egui::Slider::new(&mut grid_size, 64..=1024).text("Grid size"));
+            if grid_size != self.sim.width {
+                self.sim.resize(grid_size, grid_size);
+            }
+            
+            ui.separator();
+            
+            // Painting settings
+            ui.heading("Painting");
+            ui.add(egui::Slider::new(&mut self.sim.paint_radius, 1.0..=50.0).text("Brush radius"));
+            ui.add(egui::Slider::new(&mut self.sim.paint_strength, 0.1..=2.0).text("Brush strength"));
+            
+            ui.separator();
+            
+            // Current statistics
+            if let Some(latest_stats) = self.sim.stats_history.back() {
+                ui.heading("Live Statistics");
+                ui.label(format!("Mean U: {:.4}", latest_stats.mean_u));
+                ui.label(format!("Mean V: {:.4}", latest_stats.mean_v));
+                ui.label(format!("Total V: {:.2}", latest_stats.total_v));
+            }
+        });
+        
+        // Statistics window
+        if self.show_stats {
+            egui::Window::new("Statistics")
+                .resizable(true)
+                .default_size([400.0, 300.0])
+                .show(ctx, |ui| {
+                    if self.sim.stats_history.len() > 1 {
+                        let points_u: Vec<[f64; 2]> = self.sim.stats_history
+                            .iter()
+                            .map(|s| [s.time as f64, s.mean_u as f64])
+                            .collect();
+                        
+                        let points_v: Vec<[f64; 2]> = self.sim.stats_history
+                            .iter()
+                            .map(|s| [s.time as f64, s.mean_v as f64])
+                            .collect();
+                        
+                        use egui::plot::{Line, Plot, PlotPoints};
+                        
+                        Plot::new("statistics_plot")
+                            .view_aspect(2.0)
+                            .show(ui, |plot_ui| {
+                                plot_ui.line(Line::new(PlotPoints::from(points_u)).name("Mean U").color(egui::Color32::RED));
+                                plot_ui.line(Line::new(PlotPoints::from(points_v)).name("Mean V").color(egui::Color32::BLUE));
+                            });
+                    } else {
+                        ui.label("Not enough data points for plot");
+                    }
+                });
+        }
+        
+        // Main simulation display
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let available = ui.available_size();
+            let size = available.x.min(available.y);
+            let rect = egui::Rect::from_center_size(
+                ui.available_rect_before_wrap().center(),
+                Vec2::splat(size),
+            );
+            
+            if let Some(texture) = &self.sim.texture {
+                ui.allocate_ui_at_rect(rect, |ui| {
+                    ui.image((texture.id(), rect.size()));
+                    self.sim.handle_mouse_painting(ui, rect);
+                });
+            } else {
+                ui.allocate_ui_at_rect(rect, |ui| {
+                    ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
+                });
+            }
+            
+            // Instructions
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                ui.label("Click and drag to paint V chemical • Use controls on the right to adjust parameters");
+            });
+        });
+    }
+}
+
+fn main() -> eframe::Result {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1200.0, 800.0])
+            .with_title("Gray-Scott Reaction-Diffusion Simulation"),
+        ..Default::default()
+    };
+    
+    eframe::run_native(
+        "Gray-Scott Simulation",
+        options,
+        Box::new(|cc| Ok(Box::new(GrayScottApp::new(cc)))),
+    )
+}
