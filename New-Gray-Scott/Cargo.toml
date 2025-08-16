@@ -7,6 +7,10 @@ edition = "2024"
 eframe = "0.28"
 egui = "0.28"
 rand = "0.8"
+pixels = "0.13.0"
+winit = "0.29.0"
+rayon = "1.8.0"
+
 
 [profile.release]
 opt-level = 3
