@@ -20,14 +20,17 @@ fn main() -> Result<(), eframe::Error> {
 struct GrayScottApp {
     // Simulation state
     grid_size: usize,
-    read_grid: Vec<[f32; 2]>, // [u, v]
-    write_grid: Vec<[f32; 2]>,
+    read_grid: Vec<[f32; 3]>, // [u, v, w]
+    write_grid: Vec<[f32; 3]>,
 
     // Simulation parameters
     du: f32,   // Diffusion rate of U
     dv: f32,   // Diffusion rate of V
+    dw: f32,   // Diffusion rate of W
     feed: f32, // Feed rate (f)
     kill: f32, // Kill rate (k)
+    fw: f32,   // Feed rate for W
+    kw: f32,   // Kill rate for W
     dt: f32,   // Time step
     steps_per_frame: u32,
 
@@ -47,6 +50,9 @@ struct GrayScottApp {
 
     // Grid resize
     new_grid_size: usize,
+
+    // Color mapping: indices 0=U, 1=V, 2=W
+    color_map: [usize; 3], // [R, G, B]
 }
 
 #[derive(Default)]
@@ -70,8 +76,8 @@ impl GrayScottApp {
 
         let mut app = Self {
             grid_size,
-            read_grid: vec![[1.0, 0.0]; grid_len],
-            write_grid: vec![[1.0, 0.0]; grid_len],
+            read_grid: vec![[1.0, 0.0, 0.0]; grid_len],
+            write_grid: vec![[1.0, 0.0, 0.0]; grid_len],
 
             // Default parameters (Solitons preset)
             du: 0.16,
@@ -80,6 +86,12 @@ impl GrayScottApp {
             kill: 0.0649,
             dt: 1.0,
             steps_per_frame: 1,
+
+            dw: 0.08,
+            fw: 0.04,
+            kw: 0.06,
+
+            color_map: [0, 2, 1], // Default: U=R, W=G, V=B
 
             texture_handle: None,
             color_image: egui::ColorImage::new([grid_size, grid_size], egui::Color32::BLACK),
@@ -103,8 +115,8 @@ impl GrayScottApp {
     fn reset_grid(&mut self) {
         // Initialize grid with U=1.0, V=0.0
         let grid_len = self.grid_size * self.grid_size;
-        self.read_grid = vec![[1.0, 0.0]; grid_len];
-        self.write_grid = vec![[1.0, 0.0]; grid_len];
+        self.read_grid = vec![[1.0, 0.0, 0.0]; grid_len];
+        self.write_grid = vec![[1.0, 0.0, 0.0]; grid_len];
 
         // Add a small central patch of V
         let center = self.grid_size / 2;
@@ -116,6 +128,7 @@ impl GrayScottApp {
                     let idx = y * self.grid_size + x;
                     self.read_grid[idx][1] = 0.25; // Set V concentration
                     self.read_grid[idx][0] = 0.5; // Reduce U concentration
+                    self.read_grid[idx][2] = 0.5; // Add W in center patch
                 }
             }
         }
@@ -131,6 +144,7 @@ impl GrayScottApp {
         for cell in &mut self.read_grid {
             cell[0] = rng.gen_range(0.5..1.0); // U between 0.5 and 1.0
             cell[1] = rng.gen_range(0.0..0.5); // V between 0.0 and 0.5
+            cell[2] = rng.gen_range(0.0..0.5); // W between 0.0 and 0.5
         }
 
         self.frame_count = 0;
@@ -147,8 +161,8 @@ impl GrayScottApp {
         let grid_len = new_size * new_size;
 
         // Create new grids
-        let mut new_read_grid = vec![[1.0, 0.0]; grid_len];
-        let mut new_write_grid = vec![[1.0, 0.0]; grid_len];
+        let mut new_read_grid = vec![[1.0, 0.0, 0.0]; grid_len];
+        let mut new_write_grid = vec![[1.0, 0.0, 0.0]; grid_len];
 
         // Copy data from old grid (simple nearest neighbor sampling)
         for y in 0..new_size {
@@ -173,32 +187,36 @@ impl GrayScottApp {
     fn step_simulation(&mut self) {
         let size = self.grid_size;
 
-        // Forward Euler time stepping
         for y in 0..size {
             for x in 0..size {
                 let idx = y * size + x;
                 let u = self.read_grid[idx][0];
                 let v = self.read_grid[idx][1];
+                let w = self.read_grid[idx][2];
 
-                // Calculate Laplacian using finite differences (3x3 kernel)
+                // Laplacians
                 let laplacian_u = self.laplacian(x, y, 0);
                 let laplacian_v = self.laplacian(x, y, 1);
+                let laplacian_w = self.laplacian(x, y, 2);
 
-                // Gray-Scott equations
+                // Gray-Scott for U/V, simple interaction for W
                 let reaction = u * v * v;
                 let du_dt = self.du * laplacian_u - reaction + self.feed * (1.0 - u);
                 let dv_dt = self.dv * laplacian_v + reaction - (self.feed + self.kill) * v;
 
-                // Update concentrations
+                // W: similar to V, but interacts with U and V
+                let reaction_w = u * w * w;
+                let dw_dt = self.dw * laplacian_w + reaction_w - (self.fw + self.kw) * w;
+
                 let new_u = (u + self.dt * du_dt).clamp(0.0, 1.0);
                 let new_v = (v + self.dt * dv_dt).clamp(0.0, 1.0);
+                let new_w = (w + self.dt * dw_dt).clamp(0.0, 1.0);
 
                 self.write_grid[idx][0] = new_u;
                 self.write_grid[idx][1] = new_v;
+                self.write_grid[idx][2] = new_w;
             }
         }
-
-        // Swap buffers
         std::mem::swap(&mut self.read_grid, &mut self.write_grid);
     }
 
@@ -219,17 +237,11 @@ impl GrayScottApp {
 
     fn update_texture_data(&mut self) {
         let pixels = &mut self.color_image.pixels;
-
         for (i, cell) in self.read_grid.iter().enumerate() {
-            let u = cell[0];
-            let v = cell[1];
-
-            // Color mapping: Red = U, Blue = V, Green = 0
-            let red = (u * 255.0) as u8;
-            let blue = (v * 255.0) as u8;
-            let green = 0u8;
-
-            pixels[i] = egui::Color32::from_rgb(red, green, blue);
+            let r = (cell[self.color_map[0]] * 255.0) as u8;
+            let g = (cell[self.color_map[1]] * 255.0) as u8;
+            let b = (cell[self.color_map[2]] * 255.0) as u8;
+            pixels[i] = egui::Color32::from_rgb(r, g, b);
         }
     }
 
@@ -241,6 +253,7 @@ impl GrayScottApp {
         for cell in &self.read_grid {
             sum_u += cell[0];
             sum_v += cell[1];
+            // Optionally, add W stats if desired
         }
 
         self.current_stats.mean_u = sum_u / total_cells;
@@ -305,6 +318,38 @@ impl GrayScottApp {
         }
     }
 
+    // New: Paint W chemical
+    fn paint_w(&mut self, pos: egui::Pos2, canvas_rect: egui::Rect) {
+        let rel_x = (pos.x - canvas_rect.min.x) / canvas_rect.width();
+        let rel_y = (pos.y - canvas_rect.min.y) / canvas_rect.height();
+
+        if rel_x < 0.0 || rel_x > 1.0 || rel_y < 0.0 || rel_y > 1.0 {
+            return;
+        }
+
+        let grid_x = (rel_x * self.grid_size as f32) as i32;
+        let grid_y = (rel_y * self.grid_size as f32) as i32;
+
+        let radius = self.paint_radius as i32;
+
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let x = grid_x + dx;
+                let y = grid_y + dy;
+
+                if x >= 0 && x < self.grid_size as i32 && y >= 0 && y < self.grid_size as i32 {
+                    let dist_sq = dx * dx + dy * dy;
+                    if dist_sq <= radius * radius {
+                        let idx = y as usize * self.grid_size + x as usize;
+                        // Paint W chemical
+                        self.read_grid[idx][2] = (self.read_grid[idx][2] + 0.5).min(1.0);
+                        self.read_grid[idx][0] = (self.read_grid[idx][0] * 0.5).max(0.0);
+                    }
+                }
+            }
+        }
+    }
+
     fn load_preset(&mut self, preset: &str) {
         match preset {
             "Solitons" => {
@@ -312,18 +357,27 @@ impl GrayScottApp {
                 self.kill = 0.0649;
                 self.du = 0.16;
                 self.dv = 0.08;
+                self.fw = 0.04;
+                self.kw = 0.06;
+                self.dw = 0.08;
             }
             "Worms" => {
                 self.feed = 0.078;
                 self.kill = 0.061;
                 self.du = 0.16;
                 self.dv = 0.08;
+                self.fw = 0.04;
+                self.kw = 0.06;
+                self.dw = 0.08;
             }
             "Chaos" => {
                 self.feed = 0.025;
                 self.kill = 0.050;
                 self.du = 0.16;
                 self.dv = 0.08;
+                self.fw = 0.04;
+                self.kw = 0.06;
+                self.dw = 0.08;
             }
             _ => {}
         }
@@ -389,10 +443,28 @@ impl eframe::App for GrayScottApp {
             ui.heading("Parameters");
             ui.add(egui::Slider::new(&mut self.du, 0.0..=0.2).text("Du (U Diffusion)"));
             ui.add(egui::Slider::new(&mut self.dv, 0.0..=0.1).text("Dv (V Diffusion)"));
+            ui.add(egui::Slider::new(&mut self.dw, 0.0..=0.1).text("Dw (W Diffusion)"));
             ui.add(egui::Slider::new(&mut self.feed, 0.0..=0.1).text("Feed Rate (f)"));
             ui.add(egui::Slider::new(&mut self.kill, 0.0..=0.1).text("Kill Rate (k)"));
+            ui.add(egui::Slider::new(&mut self.fw, 0.0..=0.1).text("Feed Rate W (fw)"));
+            ui.add(egui::Slider::new(&mut self.kw, 0.0..=0.1).text("Kill Rate W (kw)"));
             ui.add(egui::Slider::new(&mut self.dt, 0.1..=2.0).text("Time Step"));
             ui.add(egui::Slider::new(&mut self.steps_per_frame, 1..=64).text("Steps per Frame"));
+
+            ui.separator();
+
+            // Color mapping controls
+            ui.heading("Color Mapping");
+            let chemicals = ["U", "V", "W"];
+            for (i, channel) in ["Red", "Green", "Blue"].iter().enumerate() {
+                egui::ComboBox::from_label(format!("{channel} channel"))
+                    .selected_text(chemicals[self.color_map[i]])
+                    .show_ui(ui, |cb| {
+                        for (idx, &chem) in chemicals.iter().enumerate() {
+                            cb.selectable_value(&mut self.color_map[i], idx, chem);
+                        }
+                    });
+            }
 
             ui.separator();
 
@@ -419,6 +491,7 @@ impl eframe::App for GrayScottApp {
             ui.heading("Interactive Painting");
             ui.add(egui::Slider::new(&mut self.paint_radius, 1.0..=20.0).text("Paint Radius"));
             ui.label("Click and drag on simulation to paint V chemical");
+            ui.label("Hold Shift and drag to paint W chemical");
 
             ui.separator();
 
@@ -456,7 +529,12 @@ impl eframe::App for GrayScottApp {
         // Main panel for simulation display
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Simulation Canvas");
-            ui.label("Red = U concentration, Blue = V concentration");
+            ui.label(format!(
+                "R = {}, G = {}, B = {}",
+                ["U", "V", "W"][self.color_map[0]],
+                ["U", "V", "W"][self.color_map[1]],
+                ["U", "V", "W"][self.color_map[2]]
+            ));
 
             if let Some(texture) = &self.texture_handle {
                 let available_size = ui.available_size();
@@ -468,7 +546,6 @@ impl eframe::App for GrayScottApp {
 
                 let response = ui.allocate_rect(image_rect, egui::Sense::click_and_drag());
 
-                // Fix borrow: paint after drawing the image
                 ui.put(
                     image_rect,
                     egui::Image::from_texture(texture)
@@ -476,10 +553,14 @@ impl eframe::App for GrayScottApp {
                         .rounding(egui::Rounding::same(4.0)),
                 );
 
-                // Handle mouse painting (after image)
+                // Paint V or W depending on Shift key
                 if response.dragged() || response.clicked() {
                     if let Some(pos) = response.interact_pointer_pos() {
-                        self.paint_v(pos, image_rect);
+                        if ctx.input(|i| i.modifiers.shift) {
+                            self.paint_w(pos, image_rect);
+                        } else {
+                            self.paint_v(pos, image_rect);
+                        }
                     }
                 }
             }
