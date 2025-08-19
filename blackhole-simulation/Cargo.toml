@@ -4,3 +4,28 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Core graphics and windowing
+wgpu = "0.20"
+winit = "0.30"
+pollster = "0.3"
+bytemuck = { version = "1.4", features = ["derive"] }
+
+# Math and linear algebra
+nalgebra = "0.32"
+glam = { version = "0.27", features = ["bytemuck"] }
+
+# Parallelization and performance
+rayon = "1.8"
+num-traits = "0.2"
+
+# Utilities
+anyhow = "1.0"
+env_logger = "0.11"
+log = "0.4"
+
+# Optional: For software rendering fallback
+softbuffer = { version = "0.4", optional = true }
+
+[features]
+default = []
+software-rendering = ["softbuffer"]
