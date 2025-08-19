@@ -1,0 +1,102 @@
+//! Simulation module for scene management and animation
+//!
+//! This module ties together physics and rendering, managing the overall
+//! simulation state, user interaction, and time-based animations.
+
+pub mod animation;
+pub mod objects;
+pub mod scene;
+
+// Re-export commonly used items
+pub use animation::*;
+pub use objects::*;
+pub use scene::Scene;
+
+use winit::event::{ElementState, KeyEvent};
+use winit::keyboard::{KeyCode, PhysicalKey};
+
+/// Input handling utilities
+pub struct InputState {
+    pub forward: bool,
+    pub backward: bool,
+    pub left: bool,
+    pub right: bool,
+    pub up: bool,
+    pub down: bool,
+    pub mouse_delta: (f32, f32),
+    pub mouse_sensitivity: f32,
+}
+
+impl Default for InputState {
+    fn default() -> Self {
+        Self {
+            forward: false,
+            backward: false,
+            left: false,
+            right: false,
+            up: false,
+            down: false,
+            mouse_delta: (0.0, 0.0),
+            mouse_sensitivity: 0.002,
+        }
+    }
+}
+
+impl InputState {
+    pub fn handle_keyboard(&mut self, event: &KeyEvent) {
+        let pressed = event.state == ElementState::Pressed;
+
+        if let PhysicalKey::Code(keycode) = event.physical_key {
+            match keycode {
+                KeyCode::KeyW | KeyCode::ArrowUp => self.forward = pressed,
+                KeyCode::KeyS | KeyCode::ArrowDown => self.backward = pressed,
+                KeyCode::KeyA | KeyCode::ArrowLeft => self.left = pressed,
+                KeyCode::KeyD | KeyCode::ArrowRight => self.right = pressed,
+                KeyCode::Space => self.up = pressed,
+                KeyCode::ShiftLeft | KeyCode::ShiftRight => self.down = pressed,
+                _ => {}
+            }
+        }
+    }
+
+    pub fn handle_mouse_move(&mut self, delta_x: f32, delta_y: f32) {
+        self.mouse_delta = (
+            delta_x * self.mouse_sensitivity,
+            delta_y * self.mouse_sensitivity,
+        );
+    }
+
+    pub fn reset_mouse_delta(&mut self) {
+        self.mouse_delta = (0.0, 0.0);
+    }
+}
+
+/// Time management for animations and physics
+#[derive(Debug, Clone)]
+pub struct TimeState {
+    pub current_time: f32,
+    pub delta_time: f32,
+    pub last_frame_time: std::time::Instant,
+    pub simulation_speed: f32,
+}
+
+impl Default for TimeState {
+    fn default() -> Self {
+        Self {
+            current_time: 0.0,
+            delta_time: 0.0,
+            last_frame_time: std::time::Instant::now(),
+            simulation_speed: 1.0,
+        }
+    }
+}
+
+impl TimeState {
+    pub fn update(&mut self) {
+        let now = std::time::Instant::now();
+        self.delta_time =
+            now.duration_since(self.last_frame_time).as_secs_f32() * self.simulation_speed;
+        self.current_time += self.delta_time;
+        self.last_frame_time = now;
+    }
+}
