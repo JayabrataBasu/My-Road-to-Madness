@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 # Core graphics and windowing
 wgpu = "0.20"
-winit = "0.30"
+winit = "0.29"
 pollster = "0.3"
 bytemuck = { version = "1.4", features = ["derive"] }
 
@@ -25,6 +25,8 @@ log = "0.4"
 
 # Optional: For software rendering fallback
 softbuffer = { version = "0.4", optional = true }
+
+ thiserror = "1.0" # Use the latest stable version, slap the idiot who forgot this
 
 [features]
 default = []

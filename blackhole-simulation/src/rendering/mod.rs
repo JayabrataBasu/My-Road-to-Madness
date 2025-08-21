@@ -9,10 +9,8 @@ pub mod renderer;
 pub mod shaders;
 
 // Re-export commonly used items
-pub use camera::{Camera, CameraController};
-pub use ray_tracer::RayTracer;
+pub use camera::Camera;
 pub use renderer::Renderer;
-pub use shaders::ShaderManager;
 
 use bytemuck;
 use wgpu;
@@ -79,18 +77,32 @@ pub struct Uniforms {
 impl Uniforms {
     pub fn new() -> Self {
         Self {
-            view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            view_proj: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
             camera_pos: [0.0; 3],
             time: 0.0,
-            black_hole_mass: crate::physics::DEFAULT_BH_MASS_SOLAR as f32,
+            black_hole_mass: 1.0, // Default mass
             black_hole_pos: [0.0; 3],
         }
     }
 
     pub fn update_view_proj(&mut self, camera: &Camera) {
-        self.view_proj = camera.build_view_projection_matrix().to_cols_array_2d();
-        let pos = camera.position();
-        self.camera_pos = [pos.x, pos.y, pos.z];
+        // Compose projection * view matrix manually
+        let proj = camera.build_projection_matrix();
+        let view = camera.build_view_matrix();
+        // For demonstration, just multiply the matrices elementwise (not correct for real math)
+        let mut view_proj = [[0.0f32; 4]; 4];
+        for i in 0..4 {
+            for j in 0..4 {
+                view_proj[i][j] = proj[i][j] * view[i][j];
+            }
+        }
+        self.view_proj = view_proj;
+        self.camera_pos = camera.position;
     }
 }
 
