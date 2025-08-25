@@ -310,6 +310,7 @@ impl<'w> Renderer<'w> {
             }
         }
         if let Some(txt) = hud_text {
+            println!("HUD string: {}", txt);
             self.draw_text(txt, 8, 8, [1.0, 1.0, 0.9, 1.0]);
         }
         let frame = self.surface.get_current_texture()?;
@@ -515,9 +516,11 @@ impl<'w> Renderer<'w> {
         let w = self.config.width;
         let h = self.config.height;
         let mut pen_x = x as i32;
+        let mut pen_y = y as i32;
         for ch in text.chars() {
             if ch == '\n' {
                 pen_x = x as i32;
+                pen_y += 8; // 7 pixel font + 1 pixel spacing
                 continue;
             }
             if (ch as u32) < 32 || (ch as u32) >= 128 {
@@ -530,7 +533,7 @@ impl<'w> Renderer<'w> {
                 for col in 0..5 {
                     if (pattern >> (4 - col)) & 1 == 1 {
                         let px = pen_x + col as i32;
-                        let py = y as i32 + row as i32;
+                        let py = pen_y + row as i32;
                         if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
                             let idx = (py as u32 * w + px as u32) as usize;
                             let dst = &mut self.framebuffer[idx];
