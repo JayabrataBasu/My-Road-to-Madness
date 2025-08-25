@@ -1,4 +1,4 @@
-# Black Hole Simulation - Authoritative Code Architecture Reference
+```# Black Hole Simulation - Authoritative Code Architecture Reference
 
 ## 🎯 **MASTER DEPENDENCY GRAPH**
 
@@ -14,7 +14,7 @@ RENDERING LAYER (Depends on PHYSICS for calculations)
     camera.rs → [SIMULATION LAYER]
     ray_tracer.rs → geodesics.rs, spacetime.rs
     shaders.rs → renderer.rs
-
+    
 SIMULATION LAYER (Orchestrates both layers)
     scene.rs → [ALL MODULES]
     objects.rs → black_hole.rs, geodesics.rs, animation.rs

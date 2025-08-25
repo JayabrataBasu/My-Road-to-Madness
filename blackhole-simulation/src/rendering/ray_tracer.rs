@@ -13,16 +13,18 @@ pub enum RayTracingQuality {
 
 pub struct RayTracer {
     pub quality: RayTracingQuality,
-    pub camera: Arc<std::sync::RwLock<Camera>>,
+    pub camera: Arc<parking_lot::RwLock<Camera>>,
     pub black_hole: Arc<BlackHole>,
     integrator: GeodesicIntegrator,
     last_camera_version: std::sync::atomic::AtomicU64,
+    cached_dims: std::sync::atomic::AtomicU64, // (w<<32)|h
+    ray_cache: parking_lot::RwLock<Vec<Vec3>>, // cached directions
 }
 
 impl RayTracer {
     pub fn new(
         quality: RayTracingQuality,
-    camera: Arc<std::sync::RwLock<Camera>>,
+        camera: Arc<parking_lot::RwLock<Camera>>,
         black_hole: Arc<BlackHole>,
     ) -> Self {
         Self {
@@ -31,19 +33,56 @@ impl RayTracer {
             black_hole,
             integrator: GeodesicIntegrator::new(IntegrationMethod::RK4),
             last_camera_version: std::sync::atomic::AtomicU64::new(0),
+            cached_dims: std::sync::atomic::AtomicU64::new(0),
+            ray_cache: parking_lot::RwLock::new(Vec::new()),
         }
     }
 
-    pub fn trace_frame(&self, framebuffer: &mut [[f32; 4]], width: u32, height: u32) {
-        let cam_lock = self.camera.read().unwrap();
+    pub fn trace_frame(&self, framebuffer: &mut [[f32; 4]], width: u32, height: u32, center_geod: bool) {
+        let cam_lock = self.camera.read();
+        let cam_version = cam_lock.version;
+        let packed_dims = ((width as u64) << 32) | height as u64;
+        let need_rebuild = self
+            .last_camera_version
+            .load(std::sync::atomic::Ordering::Relaxed)
+            != cam_version
+            || self.cached_dims.load(std::sync::atomic::Ordering::Relaxed) != packed_dims;
+        if need_rebuild {
+            let mut cache = self.ray_cache.write();
+            cache.resize((width * height) as usize, Vec3::ZERO);
+            for y in 0..height {
+                for x in 0..width {
+                    let (_, dir) = cam_lock.screen_to_world_ray(x, y, width, height);
+                    cache[(y * width + x) as usize] = dir;
+                }
+            }
+            self.last_camera_version
+                .store(cam_version, std::sync::atomic::Ordering::Relaxed);
+            self.cached_dims
+                .store(packed_dims, std::sync::atomic::Ordering::Relaxed);
+        }
+        let cache = self.ray_cache.read();
         framebuffer.par_iter_mut().enumerate().for_each(|(i, px)| {
             let x = (i as u32) % width;
             let y = (i as u32) / width;
             if y >= height {
                 return;
             }
-            let (origin, dir) = cam_lock.screen_to_world_ray(x, y, width, height);
-            let color = self.trace_ray(origin, dir);
+            let origin = cam_lock.position();
+            let dir = cache[i];
+            let mut color = self.trace_ray(origin, dir);
+            // Simple geodesic sampling for exact center pixel (demo)
+            if center_geod && x == width / 2 && y == height / 2 {
+                let pos4 = [0.0_f64, origin.x as f64, origin.y as f64, origin.z as f64];
+                let mom4 = [1.0_f64, dir.x as f64, dir.y as f64, dir.z as f64];
+                let geod =
+                    integrate_photon_geodesic(pos4, mom4, &self.black_hole, 0.01, &self.integrator);
+                if geod.terminated {
+                    color[0] *= 0.8;
+                    color[1] *= 0.8;
+                    color[2] = (color[2] * 0.8).min(1.0);
+                }
+            }
             let mapped = self.tonemap(color);
             px[0] = mapped[0];
             px[1] = mapped[1];

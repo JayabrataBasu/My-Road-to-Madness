@@ -46,12 +46,12 @@ fn main() -> anyhow::Result<()> {
             WindowEvent::Resized(size) => renderer.resize(size),
             WindowEvent::RedrawRequested => {
                 scene.update();
-                if let Err(e) = renderer.render() {
+                let hud = scene.hud_text();
+                if let Err(e) = renderer.render(Some(&hud), scene.show_center_geodesic) {
                     eprintln!("Render error: {e}");
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => scene.handle_keyboard(&event),
-            _ => {}
+            _ => scene.handle_window_event(&event),
         },
         Event::DeviceEvent { event, .. } => scene.handle_device_event(&event),
         Event::AboutToWait => win_clone.request_redraw(),

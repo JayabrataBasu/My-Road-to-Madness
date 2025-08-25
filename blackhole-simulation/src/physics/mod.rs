@@ -9,8 +9,4 @@ pub mod geodesics;      // Geodesic data structures & integrators
 
 // Re-export commonly accessed symbols for ergonomic downstream use.
 
-// Type aliases (optional convenience)
-pub type Vec3 = nalgebra::Vector3<f64>;
-pub type Vec4 = nalgebra::Vector4<f64>;
-pub type Mat4 = nalgebra::Matrix4<f64>;
 
