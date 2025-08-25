@@ -4,10 +4,12 @@ use crate::physics::constants::*;
 // ---------------- Data Types ----------------
 pub enum ParticleType {
     Photon,
+    #[cfg(feature = "advanced-physics")]
     Massive,
 }
 pub enum IntegrationMethod {
     RK4,
+    #[cfg(feature = "advanced-physics")]
     AdaptiveRK,
 }
 
@@ -18,6 +20,7 @@ pub struct Geodesic {
     pub reason: Option<&'static str>,
 }
 
+#[cfg_attr(not(feature = "advanced-physics"), allow(dead_code))]
 pub struct GeodesicIntegrator {
     pub method: IntegrationMethod,
     pub step: f64,
@@ -54,6 +57,7 @@ pub fn integrate_photon_geodesic(
     )
 }
 
+#[cfg(feature = "advanced-physics")]
 pub fn integrate_particle_orbit(
     initial_pos: [f64; 4],
     initial_momentum: [f64; 4],

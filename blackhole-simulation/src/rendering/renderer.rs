@@ -23,13 +23,14 @@ pub struct Renderer<'w> {
     pub ray_tracer: Option<RayTracer>,
     framebuffer: Vec<[f32; 4]>,
     accum_buffer: Vec<[f32; 3]>, // RGB accumulation
+    m2_buffer: Vec<[f32; 3]>,    // Welford M2 for variance tracking
     samples: u32,
     jitter: bool,
     rng_state: u64,
+    exposure_avg: f32,
     // GPU presentation resources
     fb_texture: wgpu::Texture,
     fb_view: wgpu::TextureView,
-    fb_sampler: wgpu::Sampler,
     fb_bind_group_layout: wgpu::BindGroupLayout,
     fb_bind_group: wgpu::BindGroup,
     pipeline_layout: wgpu::PipelineLayout,
@@ -91,6 +92,7 @@ impl<'w> Renderer<'w> {
         let pixel_count = (config.width * config.height) as usize;
         let framebuffer = vec![[0.0; 4]; pixel_count];
         let accum_buffer = vec![[0.0; 3]; pixel_count];
+        let m2_buffer = vec![[0.0; 3]; pixel_count];
 
         // Load shaders (basic fullscreen blit). Errors ignored if already loaded.
         let mut sm = shader_manager;
@@ -126,47 +128,27 @@ impl<'w> Renderer<'w> {
             view_formats: &[],
         });
         let fb_view = fb_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let fb_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("fb_sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
         let fb_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("fb_bgl"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                ],
+                    count: None,
+                }],
             });
         let fb_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fb_bg"),
             layout: &fb_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Sampler(&fb_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&fb_view),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&fb_view),
+            }],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -217,16 +199,17 @@ impl<'w> Renderer<'w> {
             ray_tracer,
             framebuffer,
             accum_buffer,
+            m2_buffer,
             samples: 0,
             jitter: true,
             rng_state: 0x1234_5678_ABCD_EF01,
             fb_texture,
             fb_view,
-            fb_sampler,
             fb_bind_group_layout,
             fb_bind_group,
             pipeline_layout,
             pipeline,
+            exposure_avg: 1.0,
         })
     }
 
@@ -241,6 +224,7 @@ impl<'w> Renderer<'w> {
         let pixel_count = (self.config.width * self.config.height) as usize;
         self.framebuffer.resize(pixel_count, [0.0; 4]);
         self.accum_buffer.resize(pixel_count, [0.0; 3]);
+        self.m2_buffer.resize(pixel_count, [0.0; 3]);
         self.samples = 0; // reset accumulation
         // Update camera aspect ratio if available
         if let Some(rt) = &self.ray_tracer {
@@ -270,16 +254,10 @@ impl<'w> Renderer<'w> {
         self.fb_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fb_bg"),
             layout: &self.fb_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Sampler(&self.fb_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.fb_view),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&self.fb_view),
+            }],
         });
     }
 
@@ -297,6 +275,7 @@ impl<'w> Renderer<'w> {
                         .load(std::sync::atomic::Ordering::Relaxed)
             {
                 self.accum_buffer.fill([0.0; 3]);
+                self.m2_buffer.fill([0.0; 3]);
                 self.samples = 0;
             }
             // Advance RNG (simple xorshift64*)
@@ -306,6 +285,7 @@ impl<'w> Renderer<'w> {
             let jitter_seed = self.rng_state.wrapping_mul(0x2545F4914F6CDD1D);
             rt.trace_frame_accumulate(
                 &mut self.accum_buffer,
+                &mut self.m2_buffer,
                 &mut self.framebuffer,
                 self.samples,
                 self.config.width,
@@ -314,6 +294,20 @@ impl<'w> Renderer<'w> {
                 if self.jitter { Some(jitter_seed) } else { None },
             );
             self.samples += 1;
+            // Adaptive exposure update on latest accumulated frame (pre-tonemap stored in framebuffer already mapped)
+            let mut sum_lum = 0.0f32;
+            for px in &self.framebuffer {
+                let lum = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
+                sum_lum += (lum + 1e-4).ln();
+            }
+            let log_avg = (sum_lum / self.framebuffer.len() as f32).exp();
+            let target_exposure = 0.18f32 / log_avg.max(1e-4);
+            self.exposure_avg = self.exposure_avg * 0.95 + target_exposure * 0.05;
+            for px in &mut self.framebuffer {
+                px[0] = (px[0] * self.exposure_avg).min(50.0);
+                px[1] = (px[1] * self.exposure_avg).min(50.0);
+                px[2] = (px[2] * self.exposure_avg).min(50.0);
+            }
         }
         if let Some(txt) = hud_text {
             self.draw_text(txt, 8, 8, [1.0, 1.0, 0.9, 1.0]);
@@ -403,6 +397,18 @@ impl<'w> Renderer<'w> {
         if self.jitter != on {
             self.jitter = on;
             self.samples = 0;
+        }
+    }
+
+    pub fn set_sample_pattern(&mut self, pattern: crate::rendering::ray_tracer::SamplePattern) {
+        if let Some(rt) = &mut self.ray_tracer {
+            // Need mutable access; ray_tracer is Option<RayTracer>
+            // Safety: we have &mut self
+            let rt_mut: &mut RayTracer = unsafe { &mut *(rt as *const _ as *mut RayTracer) };
+            rt_mut.set_sample_pattern(pattern);
+            self.samples = 0; // reset accumulation for new sampling pattern
+            self.accum_buffer.fill([0.0; 3]);
+            self.m2_buffer.fill([0.0; 3]);
         }
     }
 

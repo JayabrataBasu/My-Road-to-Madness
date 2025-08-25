@@ -2,6 +2,7 @@ use crate::physics::black_hole::BlackHole;
 use crate::rendering::camera::{Camera, CameraController, CameraMode};
 use crate::simulation::objects::{BlackHoleObject, SimObject};
 use crate::simulation::{InputState, TimeState};
+use crate::rendering::ray_tracer::SamplePattern;
 use glam::Vec3;
 use std::sync::Arc;
 use parking_lot::RwLock;
@@ -20,6 +21,7 @@ pub struct Scene {
     pub paused: bool,
     pub jitter: bool,
     pub samples: u32,
+    pub sample_pattern: SamplePattern,
 }
 
 impl Scene {
@@ -48,6 +50,7 @@ impl Scene {
             paused: false,
             jitter: true,
             samples: 0,
+            sample_pattern: SamplePattern::Halton,
         }
     }
 
@@ -87,6 +90,13 @@ impl Scene {
                         KeyCode::KeyG => { self.show_center_geodesic = !self.show_center_geodesic; }
                         KeyCode::KeyP => { self.paused = !self.paused; }
                         KeyCode::KeyJ => { self.jitter = !self.jitter; }
+                        KeyCode::KeyB => { // cycle sample pattern
+                            self.sample_pattern = match self.sample_pattern {
+                                SamplePattern::Halton => SamplePattern::BlueNoise,
+                                SamplePattern::BlueNoise => SamplePattern::HaltonBlueCombine,
+                                SamplePattern::HaltonBlueCombine => SamplePattern::Halton,
+                            };
+                        }
                         _ => {}
                     }
                 }
@@ -110,11 +120,13 @@ impl Scene {
         let cam = self.camera.read();
         let fps = self.last_fps.unwrap_or(0.0);
         if !self.show_hud { return String::new(); }
-        format!("FPS: {:.1}{}\nSamples: {}  Jitter: {}\nPos: ({:.1}, {:.1}, {:.1})\nDir: ({:.2}, {:.2}, {:.2})\nSpeed: {:.1}\n[G] Center Geod: {}  [H] HUD  [P] Pause: {}  [J] Jitter",
+        let pattern = match self.sample_pattern { SamplePattern::Halton => "Halton", SamplePattern::BlueNoise => "Blue", SamplePattern::HaltonBlueCombine => "Hybrid" };
+        format!("FPS: {:.1}{}\nSamples: {}  Jitter: {}  Pattern[B]: {}\nPos: ({:.1}, {:.1}, {:.1})\nDir: ({:.2}, {:.2}, {:.2})\nSpeed: {:.1}\n[G] Center Geod: {}  [H] HUD  [P] Pause: {}  [J] Jitter",
             fps,
             if self.paused { " (PAUSED)" } else { "" },
             self.samples,
             if self.jitter { "ON" } else { "OFF" },
+            pattern,
             cam.position.x, cam.position.y, cam.position.z,
             cam.forward.x, cam.forward.y, cam.forward.z,
             self.controller.speed,

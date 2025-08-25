@@ -224,6 +224,7 @@ dependencies = [
  "softbuffer",
  "thiserror",
  "wgpu",
+ "wide",
  "winit",
 ]
 

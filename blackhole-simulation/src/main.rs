@@ -48,6 +48,7 @@ fn main() -> anyhow::Result<()> {
                 scene.update();
                 // Sync renderer jitter with scene toggle
                 renderer.set_jitter(scene.jitter);
+                renderer.set_sample_pattern(scene.sample_pattern);
                 let hud = scene.hud_text();
                 if let Err(e) = renderer.render(Some(&hud), scene.show_center_geodesic) {
                     eprintln!("Render error: {e}");
