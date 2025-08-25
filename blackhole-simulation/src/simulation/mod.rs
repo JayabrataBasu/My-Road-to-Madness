@@ -3,13 +3,10 @@
 //! This module ties together physics and rendering, managing the overall
 //! simulation state, user interaction, and time-based animations.
 
-pub mod animation;
 pub mod objects;
 pub mod scene;
 
-// Re-export commonly used items
-pub use animation::*;
-pub use objects::*;
+// Re-export scene only
 pub use scene::Scene;
 
 use winit::event::{ElementState, KeyEvent};
@@ -24,7 +21,6 @@ pub struct InputState {
     pub up: bool,
     pub down: bool,
     pub mouse_delta: (f32, f32),
-    pub mouse_sensitivity: f32,
 }
 
 impl Default for InputState {
@@ -37,7 +33,7 @@ impl Default for InputState {
             up: false,
             down: false,
             mouse_delta: (0.0, 0.0),
-            mouse_sensitivity: 0.002,
+            
         }
     }
 }
@@ -59,12 +55,7 @@ impl InputState {
         }
     }
 
-    pub fn handle_mouse_move(&mut self, delta_x: f32, delta_y: f32) {
-        self.mouse_delta = (
-            delta_x * self.mouse_sensitivity,
-            delta_y * self.mouse_sensitivity,
-        );
-    }
+    // Removed unused handle_mouse_move & sensitivity
 
     pub fn reset_mouse_delta(&mut self) {
         self.mouse_delta = (0.0, 0.0);

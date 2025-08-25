@@ -22,6 +22,8 @@ pub struct Renderer<'w> {
     pub size: winit::dpi::PhysicalSize<u32>,
     pub ray_tracer: Option<RayTracer>,
     framebuffer: Vec<[f32; 4]>,
+    accum_buffer: Vec<[f32; 3]>, // RGB accumulation
+    samples: u32,
     // GPU presentation resources
     fb_texture: wgpu::Texture,
     fb_view: wgpu::TextureView,
@@ -84,7 +86,9 @@ impl<'w> Renderer<'w> {
             RenderQuality::High => RayTracingQuality::High,
         };
         let ray_tracer = Some(RayTracer::new(rt_quality, camera, bh));
-        let framebuffer = vec![[0.0; 4]; (config.width * config.height) as usize];
+    let pixel_count = (config.width * config.height) as usize;
+    let framebuffer = vec![[0.0; 4]; pixel_count];
+    let accum_buffer = vec![[0.0; 3]; pixel_count];
 
         // Load shaders (basic fullscreen blit). Errors ignored if already loaded.
         let mut sm = shader_manager;
@@ -210,6 +214,8 @@ impl<'w> Renderer<'w> {
             size,
             ray_tracer,
             framebuffer,
+            accum_buffer,
+            samples: 0,
             fb_texture,
             fb_view,
             fb_sampler,
@@ -228,8 +234,10 @@ impl<'w> Renderer<'w> {
         self.config.width = new_size.width;
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
-        self.framebuffer
-            .resize((self.config.width * self.config.height) as usize, [0.0; 4]);
+    let pixel_count = (self.config.width * self.config.height) as usize;
+    self.framebuffer.resize(pixel_count, [0.0; 4]);
+    self.accum_buffer.resize(pixel_count, [0.0; 3]);
+    self.samples = 0; // reset accumulation
         // Update camera aspect ratio if available
         if let Some(rt) = &self.ray_tracer {
             let mut cam = rt.camera.write();
@@ -276,7 +284,14 @@ impl<'w> Renderer<'w> {
 
     pub fn render(&mut self, hud_text: Option<&str>, center_geod: bool) -> Result<()> {
         if let Some(rt) = &self.ray_tracer {
-            rt.trace_frame(&mut self.framebuffer, self.config.width, self.config.height, center_geod);
+            // If camera moved reset accumulation
+            let cam_ver = rt.camera.read().version;
+            if self.samples == 0 || cam_ver != rt.last_camera_version.load(std::sync::atomic::Ordering::Relaxed) {
+                self.accum_buffer.fill([0.0; 3]);
+                self.samples = 0;
+            }
+            rt.trace_frame_accumulate(&mut self.accum_buffer, &mut self.framebuffer, self.samples, self.config.width, self.config.height, center_geod);
+            self.samples += 1;
         }
         if let Some(txt) = hud_text {
             self.draw_text(txt, 8, 8, [1.0, 1.0, 0.9, 1.0]);

@@ -65,6 +65,27 @@ impl Camera {
         (self.position, dir_world)
     }
 
+    /// Jittered subpixel ray: ox, oy in [0,1) offset inside pixel for sampling.
+    pub fn screen_to_world_ray_offset(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        ox: f32,
+        oy: f32,
+    ) -> (Vec3, Vec3) {
+        let nx = ((x as f32 + ox) / width as f32) * 2.0 - 1.0;
+        let ny = 1.0 - ((y as f32 + oy) / height as f32) * 2.0; // flip Y
+        let tan_half = (self.fov_y * 0.5).tan();
+        let dx = nx * tan_half * self.aspect;
+        let dy = ny * tan_half;
+        let dir_cam = Vec3::new(dx, dy, -1.0).normalize();
+        let dir_world =
+            (self.right * dir_cam.x + self.up * dir_cam.y + self.forward * dir_cam.z).normalize();
+        (self.position, dir_world)
+    }
+
     #[inline]
     pub fn mark_changed(&mut self) {
         self.version = self.version.wrapping_add(1);
