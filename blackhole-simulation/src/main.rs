@@ -46,10 +46,13 @@ fn main() -> anyhow::Result<()> {
             WindowEvent::Resized(size) => renderer.resize(size),
             WindowEvent::RedrawRequested => {
                 scene.update();
+                // Sync renderer jitter with scene toggle
+                renderer.set_jitter(scene.jitter);
                 let hud = scene.hud_text();
                 if let Err(e) = renderer.render(Some(&hud), scene.show_center_geodesic) {
                     eprintln!("Render error: {e}");
                 }
+                scene.samples = renderer.sample_count();
             }
             _ => scene.handle_window_event(&event),
         },

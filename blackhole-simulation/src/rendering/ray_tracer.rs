@@ -44,6 +44,7 @@ impl RayTracer {
         width: u32,
         height: u32,
         center_geod: bool,
+        jitter_seed: Option<u64>,
     ) {
         let cam_lock = self.camera.read();
         let cam_version = cam_lock.version;
@@ -84,7 +85,16 @@ impl RayTracer {
                     return;
                 }
                 let origin = cam_lock.position();
-                let dir = cache[i];
+                // Jitter: hash pixel + sample + seed -> subpixel offsets in [0,1)
+                let dir = if jitter_seed.is_some() {
+                    let h = hash_u64(jitter_seed.unwrap() ^ ((i as u64) << 32) ^ samples as u64);
+                    let jx = ((h & 0xFFFF) as f32) / 65535.0; // 0..1
+                    let jy = (((h >> 16) & 0xFFFF) as f32) / 65535.0;
+                    let (_, d) = cam_lock.screen_to_world_ray_offset(x, y, width, height, jx, jy);
+                    d
+                } else {
+                    cache[i]
+                };
                 let mut color = self.trace_ray(origin, dir);
                 if center_geod && x == width / 2 && y == height / 2 {
                     let pos4 = [0.0_f64, origin.x as f64, origin.y as f64, origin.z as f64];
@@ -141,4 +151,13 @@ impl RayTracer {
             reinhard(c[2]).powf(gamma),
         ]
     }
+}
+
+#[inline]
+fn hash_u64(mut x: u64) -> u64 {
+    // 64-bit mix (splitmix64)
+    x = x.wrapping_add(0x9E3779B97F4A7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
+    x ^ (x >> 31)
 }

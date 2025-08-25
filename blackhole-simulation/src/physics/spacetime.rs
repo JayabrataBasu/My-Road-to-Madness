@@ -1,3 +1,4 @@
+#![allow(dead_code)] // Keep rich placeholder physics utilities without warning noise
 use crate::physics::constants::*;
 use nalgebra::{Matrix4, Vector3};
 

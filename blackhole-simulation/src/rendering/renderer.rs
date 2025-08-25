@@ -24,6 +24,8 @@ pub struct Renderer<'w> {
     framebuffer: Vec<[f32; 4]>,
     accum_buffer: Vec<[f32; 3]>, // RGB accumulation
     samples: u32,
+    jitter: bool,
+    rng_state: u64,
     // GPU presentation resources
     fb_texture: wgpu::Texture,
     fb_view: wgpu::TextureView,
@@ -86,9 +88,9 @@ impl<'w> Renderer<'w> {
             RenderQuality::High => RayTracingQuality::High,
         };
         let ray_tracer = Some(RayTracer::new(rt_quality, camera, bh));
-    let pixel_count = (config.width * config.height) as usize;
-    let framebuffer = vec![[0.0; 4]; pixel_count];
-    let accum_buffer = vec![[0.0; 3]; pixel_count];
+        let pixel_count = (config.width * config.height) as usize;
+        let framebuffer = vec![[0.0; 4]; pixel_count];
+        let accum_buffer = vec![[0.0; 3]; pixel_count];
 
         // Load shaders (basic fullscreen blit). Errors ignored if already loaded.
         let mut sm = shader_manager;
@@ -216,6 +218,8 @@ impl<'w> Renderer<'w> {
             framebuffer,
             accum_buffer,
             samples: 0,
+            jitter: true,
+            rng_state: 0x1234_5678_ABCD_EF01,
             fb_texture,
             fb_view,
             fb_sampler,
@@ -234,10 +238,10 @@ impl<'w> Renderer<'w> {
         self.config.width = new_size.width;
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
-    let pixel_count = (self.config.width * self.config.height) as usize;
-    self.framebuffer.resize(pixel_count, [0.0; 4]);
-    self.accum_buffer.resize(pixel_count, [0.0; 3]);
-    self.samples = 0; // reset accumulation
+        let pixel_count = (self.config.width * self.config.height) as usize;
+        self.framebuffer.resize(pixel_count, [0.0; 4]);
+        self.accum_buffer.resize(pixel_count, [0.0; 3]);
+        self.samples = 0; // reset accumulation
         // Update camera aspect ratio if available
         if let Some(rt) = &self.ray_tracer {
             let mut cam = rt.camera.write();
@@ -286,11 +290,29 @@ impl<'w> Renderer<'w> {
         if let Some(rt) = &self.ray_tracer {
             // If camera moved reset accumulation
             let cam_ver = rt.camera.read().version;
-            if self.samples == 0 || cam_ver != rt.last_camera_version.load(std::sync::atomic::Ordering::Relaxed) {
+            if self.samples == 0
+                || cam_ver
+                    != rt
+                        .last_camera_version
+                        .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 self.accum_buffer.fill([0.0; 3]);
                 self.samples = 0;
             }
-            rt.trace_frame_accumulate(&mut self.accum_buffer, &mut self.framebuffer, self.samples, self.config.width, self.config.height, center_geod);
+            // Advance RNG (simple xorshift64*)
+            self.rng_state ^= self.rng_state >> 12;
+            self.rng_state ^= self.rng_state << 25;
+            self.rng_state ^= self.rng_state >> 27;
+            let jitter_seed = self.rng_state.wrapping_mul(0x2545F4914F6CDD1D);
+            rt.trace_frame_accumulate(
+                &mut self.accum_buffer,
+                &mut self.framebuffer,
+                self.samples,
+                self.config.width,
+                self.config.height,
+                center_geod,
+                if self.jitter { Some(jitter_seed) } else { None },
+            );
             self.samples += 1;
         }
         if let Some(txt) = hud_text {
@@ -372,6 +394,16 @@ impl<'w> Renderer<'w> {
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         Ok(())
+    }
+
+    pub fn sample_count(&self) -> u32 {
+        self.samples
+    }
+    pub fn set_jitter(&mut self, on: bool) {
+        if self.jitter != on {
+            self.jitter = on;
+            self.samples = 0;
+        }
     }
 
     fn draw_text(&mut self, text: &str, x: u32, y: u32, color: [f32; 4]) {

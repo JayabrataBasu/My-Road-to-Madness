@@ -18,6 +18,8 @@ pub struct Scene {
     pub show_hud: bool,
     pub show_center_geodesic: bool,
     pub paused: bool,
+    pub jitter: bool,
+    pub samples: u32,
 }
 
 impl Scene {
@@ -44,6 +46,8 @@ impl Scene {
             show_hud: true,
             show_center_geodesic: true,
             paused: false,
+            jitter: true,
+            samples: 0,
         }
     }
 
@@ -62,7 +66,7 @@ impl Scene {
                 cam.set_orientation_from_yaw_pitch(self.controller.yaw, self.controller.pitch);
             }
         }
-        if let Some(fps) = self.time.fps_sample() {
+    if let Some(fps) = self.time.fps_sample() {
             log::info!("FPS: {:.1}", fps);
             self.last_fps = Some(fps);
         }
@@ -82,6 +86,7 @@ impl Scene {
                         KeyCode::KeyH => { self.show_hud = !self.show_hud; }
                         KeyCode::KeyG => { self.show_center_geodesic = !self.show_center_geodesic; }
                         KeyCode::KeyP => { self.paused = !self.paused; }
+                        KeyCode::KeyJ => { self.jitter = !self.jitter; }
                         _ => {}
                     }
                 }
@@ -105,9 +110,11 @@ impl Scene {
         let cam = self.camera.read();
         let fps = self.last_fps.unwrap_or(0.0);
         if !self.show_hud { return String::new(); }
-        format!("FPS: {:.1}{}\nPos: ({:.1}, {:.1}, {:.1})\nDir: ({:.2}, {:.2}, {:.2})\nSpeed: {:.1}\n[G] Center Geod: {}  [H] HUD  [P] Pause: {}",
+        format!("FPS: {:.1}{}\nSamples: {}  Jitter: {}\nPos: ({:.1}, {:.1}, {:.1})\nDir: ({:.2}, {:.2}, {:.2})\nSpeed: {:.1}\n[G] Center Geod: {}  [H] HUD  [P] Pause: {}  [J] Jitter",
             fps,
             if self.paused { " (PAUSED)" } else { "" },
+            self.samples,
+            if self.jitter { "ON" } else { "OFF" },
             cam.position.x, cam.position.y, cam.position.z,
             cam.forward.x, cam.forward.y, cam.forward.z,
             self.controller.speed,
