@@ -1,113 +1,131 @@
-use crate::physics::black_hole::BlackHole;
+use crate::physics::constants::*;
+use nalgebra::{Matrix4, Vector3};
 
-pub struct MetricTensor {
-    pub components: [[f64; 4]; 4],
-}
-
-impl MetricTensor {
-    /// Schwarzschild metric components at (t, r, theta, phi)
-    pub fn schwarzschild(mass: f64, r: f64, theta: f64) -> Self {
-        let rs = 2.0 * 6.67430e-11 * mass / (2.99792458e8 * 2.99792458e8);
-        let g00 = -(1.0 - rs / r);
-        let g11 = 1.0 / (1.0 - rs / r);
-        let g22 = r * r;
-        let g33 = r * r * theta.sin().powi(2);
-        MetricTensor {
-            components: [
-                [g00, 0.0, 0.0, 0.0],
-                [0.0, g11, 0.0, 0.0],
-                [0.0, 0.0, g22, 0.0],
-                [0.0, 0.0, 0.0, g33],
-            ],
-        }
-    }
-
-    /// Kerr metric components at (t, r, theta, phi)
-    pub fn kerr(bh: &BlackHole, r: f64, theta: f64) -> Self {
-        let m = 6.67430e-11 * bh.mass / (2.99792458e8 * 2.99792458e8);
-        let a = bh.spin * m;
-        let cos_theta = theta.cos();
-        let sin_theta = theta.sin();
-        let rho2 = r * r + a * a * cos_theta * cos_theta;
-        let delta = r * r - 2.0 * m * r + a * a;
-
-        let g00 = -(1.0 - 2.0 * m * r / rho2);
-        let g03 = -2.0 * m * r * a * sin_theta * sin_theta / rho2;
-        let g11 = rho2 / delta;
-        let g22 = rho2;
-        let g33 = (r * r + a * a + 2.0 * m * r * a * a * sin_theta * sin_theta / rho2)
-            * sin_theta
-            * sin_theta;
-
-        MetricTensor {
-            components: [
-                [g00, 0.0, 0.0, g03],
-                [0.0, g11, 0.0, 0.0],
-                [0.0, 0.0, g22, 0.0],
-                [g03, 0.0, 0.0, g33],
-            ],
-        }
-    }
-}
-
-/// Convert between coordinate systems
+/// Coordinate systems used for metric evaluation & transformations.
 pub enum CoordinateSystem {
     Cartesian,
-    Schwarzschild,
+    Spherical,
     BoyerLindquist,
 }
 
-/// Convert coordinates between systems
-pub fn coordinate_transform(
-    coords: [f64; 4],
-    from: CoordinateSystem,
-    to: CoordinateSystem,
-    bh: Option<&BlackHole>,
-) -> [f64; 4] {
-    // Only basic Schwarzschild <-> Cartesian implemented for brevity
-    match (from, to) {
-        (CoordinateSystem::Cartesian, CoordinateSystem::Schwarzschild) => {
-            let (x, y, z) = (coords[1], coords[2], coords[3]);
-            let r = (x * x + y * y + z * z).sqrt();
-            let theta = if r == 0.0 { 0.0 } else { (z / r).acos() };
-            let phi = y.atan2(x);
-            [coords[0], r, theta, phi]
+/// Metric tensor wrapper using nalgebra for determinant/inversion convenience.
+pub struct MetricTensor {
+    pub components: Matrix4<f64>,
+}
+
+impl MetricTensor {
+    /// Schwarzschild metric (t,r,theta,phi) with geometric units.
+    pub fn schwarzschild(mass_geo: f64, r: f64, theta: f64) -> Self {
+        let rs = SCHWARZSCHILD_FACTOR * mass_geo; // 2M
+        let f = 1.0 - rs / r;
+        let sin_t = theta.sin();
+        let diag = [-f, 1.0 / f, r * r, r * r * sin_t * sin_t];
+        let mut m = Matrix4::<f64>::zeros();
+        for i in 0..4 {
+            m[(i, i)] = diag[i];
         }
-        (CoordinateSystem::Schwarzschild, CoordinateSystem::Cartesian) => {
-            let (r, theta, phi) = (coords[1], coords[2], coords[3]);
-            let x = r * theta.sin() * phi.cos();
-            let y = r * theta.sin() * phi.sin();
-            let z = r * theta.cos();
-            [coords[0], x, y, z]
+        Self { components: m }
+    }
+
+    /// Kerr metric in Boyer-Lindquist coordinates.
+    #[cfg(feature = "kerr")]
+    pub fn kerr(mass_geo: f64, a_dim: f64, r: f64, theta: f64) -> Self {
+        let cos_t = theta.cos();
+        let sin_t = theta.sin();
+        let sin2 = sin_t * sin_t;
+        let rho2 = r * r + a_dim * a_dim * cos_t * cos_t;
+        let delta = r * r - 2.0 * mass_geo * r + a_dim * a_dim;
+        let g00 = -(1.0 - 2.0 * mass_geo * r / rho2);
+        let g03 = -2.0 * mass_geo * r * a_dim * sin2 / rho2;
+        let g11 = rho2 / delta;
+        let g22 = rho2;
+        let g33 = (r * r + a_dim * a_dim + 2.0 * mass_geo * r * a_dim * a_dim * sin2 / rho2) * sin2;
+        let mut m = Matrix4::<f64>::zeros();
+        m[(0, 0)] = g00;
+        m[(0, 3)] = g03;
+        m[(3, 0)] = g03;
+        m[(1, 1)] = g11;
+        m[(2, 2)] = g22;
+        m[(3, 3)] = g33;
+        Self { components: m }
+    }
+
+    /// Determinant of the metric.
+    pub fn determinant(&self) -> f64 {
+        self.components.determinant()
+    }
+
+    /// Inverse metric.
+    pub fn inverse(&self) -> Self {
+        Self {
+            components: self.components.try_inverse().unwrap_or_else(Matrix4::zeros),
         }
-        // Boyer-Lindquist <-> Cartesian not implemented
-        _ => coords,
+    }
+
+    /// Christoffel symbols (very simplified finite-difference placeholder).
+    /// Returns Gamma^mu_{nu,sigma} as [[[f64;4];4];4].
+    pub fn christoffel_symbols(&self) -> [[[f64; 4]; 4]; 4] {
+        // Placeholder zeros; full implementation requires partial derivatives of metric.
+        [[[0.0; 4]; 4]; 4]
     }
 }
 
-/// Calculate spacetime interval ds^2 given metric and dx^mu
+// ---------------- Coordinate Transformations ----------------
+pub fn cartesian_to_spherical(v: Vector3<f64>) -> (f64, f64, f64) {
+    let r = v.norm();
+    if r == 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let theta = (v.z / r).acos();
+    let phi = v.y.atan2(v.x);
+    (r, theta, phi)
+}
+
+pub fn spherical_to_cartesian(r: f64, theta: f64, phi: f64) -> Vector3<f64> {
+    let sin_t = theta.sin();
+    Vector3::new(
+        r * sin_t * phi.cos(),
+        r * sin_t * phi.sin(),
+        r * theta.cos(),
+    )
+}
+
+// Boyer-Lindquist <-> Cartesian (simplified ignoring frame dragging for placeholder conversions)
+pub fn cartesian_to_boyer_lindquist(v: Vector3<f64>, _a_dim: f64) -> (f64, f64, f64) {
+    cartesian_to_spherical(v) /* TODO refine for spin */
+}
+pub fn boyer_lindquist_to_cartesian(r: f64, theta: f64, phi: f64, _a_dim: f64) -> Vector3<f64> {
+    spherical_to_cartesian(r, theta, phi) /* TODO refine */
+}
+
+// ---------------- Scalar Helper Functions ----------------
 pub fn spacetime_interval(metric: &MetricTensor, dx: [f64; 4]) -> f64 {
     let mut ds2 = 0.0;
     for mu in 0..4 {
         for nu in 0..4 {
-            ds2 += metric.components[mu][nu] * dx[mu] * dx[nu];
+            ds2 += metric.components[(mu, nu)] * dx[mu] * dx[nu];
         }
     }
     ds2
 }
 
-/// Approximate Kretschmann scalar for Schwarzschild (curvature invariant)
-pub fn curvature_scalar(mass: f64, r: f64) -> f64 {
-    let rs = 2.0 * 6.67430e-11 * mass / (2.99792458e8 * 2.99792458e8);
-    48.0 * (rs * rs) / (r * r * r * r)
+pub fn proper_time_factor(metric: &MetricTensor, four_velocity: [f64; 4]) -> f64 {
+    let ds2 = spacetime_interval(metric, four_velocity);
+    (-ds2).sqrt()
 }
 
-/// Gravitational redshift factor z = (1 - rs/r)^(-1/2) - 1
-pub fn redshift_factor(mass: f64, r: f64) -> f64 {
-    let rs = 2.0 * 6.67430e-11 * mass / (2.99792458e8 * 2.99792458e8);
-    if r <= rs {
-        f64::INFINITY
-    } else {
-        1.0 / (1.0 - rs / r).sqrt() - 1.0
+pub fn gravitational_redshift(mass_geo: f64, r: f64, _theta: f64, a_opt: Option<f64>) -> f64 {
+    if r <= 0.0 {
+        return f64::INFINITY;
     }
+    #[cfg(feature = "kerr")]
+    {
+        if let Some(_a_dim) = a_opt {
+            // Simplified: use Schwarzschild-like factor as placeholder
+            let rs = SCHWARZSCHILD_FACTOR * mass_geo;
+            return 1.0 / (1.0 - rs / r).sqrt();
+        }
+    }
+    let rs = SCHWARZSCHILD_FACTOR * mass_geo;
+    1.0 / (1.0 - rs / r).sqrt()
 }

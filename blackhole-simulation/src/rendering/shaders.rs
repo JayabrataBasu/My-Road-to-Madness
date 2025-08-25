@@ -1,54 +1,30 @@
+use std::{collections::HashMap, sync::Arc, path::Path};
+use anyhow::Result;
+
 pub struct ShaderManager {
-    // Add fields for storing loaded shaders
+    device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
+    shader_modules: HashMap<String, wgpu::ShaderModule>,
 }
 
 impl ShaderManager {
-    pub fn new() -> Self {
-        ShaderManager {
-            // Initialize fields
-        }
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        Self { device, queue, shader_modules: HashMap::new() }
     }
 
-    pub fn load_vertex_shader(&self) -> String {
-        // Return WGSL vertex shader source (stub)
-        r#"
-        @vertex
-        fn vs_main(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
-            return vec4<f32>(position, 1.0);
-        }
-        "#
-        .to_string()
+    pub fn load_wgsl_str(&mut self, name:&str, source:&str) -> Result<()> {
+        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(name),
+            source: wgpu::ShaderSource::Wgsl(source.into())
+        });
+        self.shader_modules.insert(name.to_string(), module);
+        Ok(())
     }
 
-    pub fn load_fragment_shader(&self) -> String {
-        // Return WGSL fragment shader source (stub)
-        r#"
-        @fragment
-        fn fs_main() -> @location(0) vec4<f32> {
-            return vec4<f32>(1.0, 0.0, 0.0, 1.0);
-        }
-        "#
-        .to_string()
+    pub fn load_wgsl_file(&mut self, name:&str, path:&Path) -> Result<()> {
+        let src = std::fs::read_to_string(path)?;
+        self.load_wgsl_str(name, &src)
     }
 
-    pub fn load_compute_shader(&self) -> String {
-        // Return WGSL compute shader source (stub)
-        r#"
-        @compute @workgroup_size(64)
-        fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-            // GPU-accelerated physics computation
-        }
-        "#
-        .to_string()
-    }
-
-    pub fn hot_reload_shaders(&mut self) {
-        // Development feature for shader iteration (stub)
-        println!("Hot-reloading shaders...");
-    }
-
-    pub fn create_pipeline_layout(&self) {
-        // Define uniform buffer layouts (stub)
-        println!("Creating pipeline layout...");
-    }
+    pub fn get(&self, name:&str) -> Option<&wgpu::ShaderModule> { self.shader_modules.get(name) }
 }

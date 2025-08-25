@@ -3,6 +3,8 @@
 //! This module handles all aspects of rendering the black hole simulation,
 //! including the graphics pipeline, ray tracing, camera system, and shaders.
 
+#![allow(unused_imports)] // Re-exports may be unused internally during partial implementation
+
 pub mod camera;
 pub mod ray_tracer;
 pub mod renderer;
@@ -10,7 +12,8 @@ pub mod shaders;
 
 // Re-export commonly used items
 pub use camera::Camera;
-pub use renderer::Renderer;
+pub use renderer::{Renderer, RenderQuality};
+pub use ray_tracer::{RayTracingQuality, RayTracer};
 
 use bytemuck;
 use wgpu;
@@ -91,20 +94,14 @@ impl Uniforms {
     }
 
     pub fn update_view_proj(&mut self, camera: &Camera) {
-        // Compose projection * view matrix manually
-        let proj = camera.build_projection_matrix();
-        let view = camera.build_view_matrix();
-        // For demonstration, just multiply the matrices elementwise (not correct for real math)
-        let mut view_proj = [[0.0f32; 4]; 4];
-        for i in 0..4 {
-            for j in 0..4 {
-                view_proj[i][j] = proj[i][j] * view[i][j];
-            }
-        }
-        self.view_proj = view_proj;
-        self.camera_pos = camera.position;
+    let vp = camera.view_projection();
+    self.view_proj = vp.to_cols_array_2d();
+    self.camera_pos = camera.position.to_array();
     }
 }
+
+// TODO: Uniforms / Vertex structures are legacy placeholders from earlier pipeline sketches.
+// They will be reconciled or removed once the GPU path is implemented in a later Phase 2 step.
 
 /// Rendering error types
 #[derive(Debug, thiserror::Error)]

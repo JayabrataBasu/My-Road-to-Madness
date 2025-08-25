@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 # Core graphics and windowing
-wgpu = "0.20"
+wgpu = "0.20" # Using 0.20 (newer than design spec 0.19) – adjust prompts if strict pin required
 winit = "0.29"
 pollster = "0.3"
 bytemuck = { version = "1.4", features = ["derive"] }
@@ -15,19 +15,20 @@ nalgebra = "0.32"
 glam = { version = "0.27", features = ["bytemuck"] }
 
 # Parallelization and performance
-rayon = "1.8"
+rayon = "1.8" # Design doc mentioned 1.10; upgrade later when published
 num-traits = "0.2"
 
 # Utilities
 anyhow = "1.0"
 env_logger = "0.11"
 log = "0.4"
+thiserror = "1.0"
 
 # Optional: For software rendering fallback
 softbuffer = { version = "0.4", optional = true }
 
- thiserror = "1.0" # Use the latest stable version, slap the idiot who forgot this
-
 [features]
-default = []
+default = ["kerr"]
+kerr = []
+debug-physics = []
 software-rendering = ["softbuffer"]

@@ -1,56 +1,149 @@
-// Physical constants (SI units)
-const G: f64 = 6.67430e-11; // gravitational constant (m^3 kg^-1 s^-2)
-const C: f64 = 2.99792458e8; // speed of light (m/s)
-const HBAR: f64 = 1.054571817e-34; // reduced Planck constant (J s)
-const KB: f64 = 1.380649e-23; // Boltzmann constant (J/K)
-const SIGMA: f64 = 5.670374419e-8; // Stefan-Boltzmann constant (W m^-2 K^-4)
-const PI: f64 = std::f64::consts::PI;
+use crate::physics::constants::*;
+use anyhow::{Result, anyhow};
+use nalgebra::Vector3;
 
-#[derive(Debug, Clone, Copy)]
+/// Representation of an astrophysical black hole.
+///
+/// Stored mass is in solar masses (mass_solar). All *derived* geometric
+/// quantities convert solar masses -> geometric length units (M) using:
+/// M (length) = G * M_kg / c^2. In geometric units we set G=c=1 so the
+/// dimensionful distinction collapses; we retain conversion for clarity.
+#[derive(Debug, Clone)]
 pub struct BlackHole {
-    pub mass: f64,   // in kg
-    pub spin: f64,   // dimensionless (a/M, 0 <= spin < 1)
-    pub charge: f64, // in Coulombs (usually 0 for astrophysical BHs)
+    mass_solar: f64,        // Mass in solar masses
+    spin: f64,              // Dimensionless a* (|a*| <= THORNE_SPIN_LIMIT)
+    charge: f64,            // Currently unused (set 0.0 for neutrality)
+    position: Vector3<f64>, // Spatial position in geometric units
+    accretion_rate: f64,    // Dimensionless placeholder (Eddington fraction)
 }
 
 impl BlackHole {
-    /// Create a new black hole with mass (kg), spin (0..1), and charge (C)
-    pub fn new(mass: f64, spin: f64, charge: f64) -> Self {
-        BlackHole { mass, spin, charge }
+    #[inline]
+    pub fn new(
+        mass_solar: f64,
+        mut spin: f64,
+        charge: f64,
+        position: Vector3<f64>,
+        accretion_rate: f64,
+    ) -> Result<Self> {
+        if mass_solar <= 0.0 {
+            return Err(anyhow!("mass must be > 0"));
+        }
+        // Clamp spin to physical bounds
+        if spin.abs() > THORNE_SPIN_LIMIT {
+            spin = spin.signum() * THORNE_SPIN_LIMIT;
+        }
+        Ok(Self {
+            mass_solar,
+            spin,
+            charge,
+            position,
+            accretion_rate,
+        })
     }
 
-    /// Schwarzschild radius (event horizon for non-rotating, uncharged BH)
+    #[inline]
+    pub fn new_schwarzschild(mass_solar: f64) -> Result<Self> {
+        Self::new(mass_solar, 0.0, 0.0, Vector3::zeros(), 0.0)
+    }
+    #[inline]
+    pub fn new_kerr(mass_solar: f64, spin: f64) -> Result<Self> {
+        Self::new(mass_solar, spin, 0.0, Vector3::zeros(), 0.0)
+    }
+
+    // Convenience mass scale constructors (illustrative defaults)
+    #[inline]
+    pub fn stellar_mass() -> Result<Self> {
+        Self::new_schwarzschild(10.0)
+    }
+    #[inline]
+    pub fn intermediate_mass() -> Result<Self> {
+        Self::new_schwarzschild(10_000.0)
+    }
+    #[inline]
+    pub fn supermassive() -> Result<Self> {
+        Self::new_kerr(4.0e6, 0.5)
+    }
+
+    // ---------------- Getters ----------------
+    #[inline]
+    pub fn mass_solar(&self) -> f64 {
+        self.mass_solar
+    }
+    #[inline]
+    pub fn spin(&self) -> f64 {
+        self.spin
+    }
+    #[inline]
+    pub fn charge(&self) -> f64 {
+        self.charge
+    }
+    #[inline]
+    pub fn position(&self) -> &Vector3<f64> {
+        &self.position
+    }
+    #[inline]
+    pub fn accretion_rate(&self) -> f64 {
+        self.accretion_rate
+    }
+
+    // ---------------- Derived quantities ----------------
+    /// Mass in geometric length units (M). Using M = G M_kg / c^2.
+    #[inline]
+    pub fn mass_geometric(&self) -> f64 {
+        let mass_kg = self.mass_solar * SOLAR_MASS;
+        G_SI * mass_kg / (C_SI * C_SI)
+    }
+
+    /// Schwarzschild radius r_s = 2 M (geometric units) for spin=0 definition.
+    #[inline]
     pub fn schwarzschild_radius(&self) -> f64 {
-        2.0 * G * self.mass / (C * C)
+        SCHWARZSCHILD_FACTOR * self.mass_geometric()
     }
 
-    /// Ergosphere radius at equator (Kerr metric, spin in [0,1))
-    pub fn ergosphere_radius(&self) -> f64 {
-        let m = G * self.mass / (C * C);
-        let a = self.spin * m;
-        m + (m * m - a * a).sqrt()
+    /// Event horizon radius r_+ (Kerr) = M + sqrt(M^2 - a^2).
+    #[inline]
+    pub fn event_horizon_radius(&self) -> f64 {
+        let m = self.mass_geometric();
+        #[cfg(feature = "kerr")]
+        {
+            let a = self.spin * m; // dimensional spin length a = a* M
+            if a.abs() >= m {
+                return m;
+            }
+            m + (m * m - a * a).sqrt()
+        }
+        #[cfg(not(feature = "kerr"))]
+        {
+            m * SCHWARZSCHILD_FACTOR / 2.0 // fallback: treat as Schwarzschild
+        }
     }
 
-    /// Surface gravity at event horizon (Kerr, neglecting charge)
-    pub fn surface_gravity(&self) -> f64 {
-        let m = G * self.mass / (C * C);
-        let a = self.spin * m;
-        let r_plus = m + (m * m - a * a).sqrt();
-        C * C * (r_plus - m) / (2.0 * m * r_plus)
+    /// Photon sphere radius (approx; exact for Schwarzschild). For Kerr this
+    /// would depend on inclination & pro/retrograde; we provide Schwarzschild value.
+    #[inline]
+    pub fn photon_sphere_radius(&self) -> f64 {
+        PHOTON_SPHERE_FACTOR * self.mass_geometric() * SCHWARZSCHILD_FACTOR / 2.0
     }
 
-    /// Hawking temperature (K)
-    pub fn temperature(&self) -> f64 {
-        let m = G * self.mass / (C * C);
-        let a = self.spin * m;
-        let r_plus = m + (m * m - a * a).sqrt();
-        HBAR * C / (4.0 * PI * KB * r_plus)
+    /// Ergosphere outer boundary at polar angle theta.
+    pub fn ergosphere_radius(&self, theta: f64) -> f64 {
+        let m = self.mass_geometric();
+        #[cfg(feature = "kerr")]
+        {
+            let a = self.spin * m;
+            let cos_t = theta.cos();
+            m + (m * m - a * a * cos_t * cos_t).sqrt()
+        }
+        #[cfg(not(feature = "kerr"))]
+        {
+            self.event_horizon_radius()
+        }
     }
 
-    /// Accretion disk luminosity (Eddington limit, rough estimate, in Watts)
-    pub fn luminosity(&self) -> f64 {
-        // L_Edd = 1.26e31 * (M / M_sun) W
-        let m_sun = 1.98847e30;
-        1.26e31 * (self.mass / m_sun)
+    /// Check if spin is near-extremal (informational).
+    #[inline]
+    pub fn is_extremal(&self) -> bool {
+        (self.spin.abs() - THORNE_SPIN_LIMIT).abs() < 1e-6
     }
 }

@@ -1,46 +1,16 @@
-//! Physics module for black hole simulation
-//!
-//! This module contains all the scientific calculations and physical
-//! modeling for the black hole simulation, including spacetime geometry,
-//! geodesics, and gravitational effects.
+//! Physics root module: exposes constants, black hole model, spacetime metrics
+//! and geodesic integration utilities. All physics uses f64 and geometric
+//! units internally (G = c = 1 after normalization).
 
-pub mod black_hole;
-pub mod constants;
-pub mod geodesics;
-pub mod spacetime;
+pub mod constants;      // Fundamental & numerical constants
+pub mod black_hole;     // BlackHole struct & derived properties
+pub mod spacetime;      // Metric tensors & coordinate transforms
+pub mod geodesics;      // Geodesic data structures & integrators
 
-// Re-export commonly used items
-pub use black_hole::BlackHole;
-pub use constants::*;
-pub use geodesics::*;
-pub use spacetime::*;
+// Re-export commonly accessed symbols for ergonomic downstream use.
 
-/// Common 3D vector type for physics calculations
+// Type aliases (optional convenience)
 pub type Vec3 = nalgebra::Vector3<f64>;
-
-/// Common 4D spacetime vector type
 pub type Vec4 = nalgebra::Vector4<f64>;
-
-/// Common matrix type for transformations
 pub type Mat4 = nalgebra::Matrix4<f64>;
 
-/// Physical units and conversion factors
-#[derive(Debug, Clone, Copy)]
-pub struct Units;
-
-impl Units {
-    /// Convert from geometric units to SI units
-    pub const fn geometric_to_si() -> f64 {
-        1.0
-    }
-
-    /// Convert solar masses to kilograms
-    pub const fn solar_mass_to_kg() -> f64 {
-        SOLAR_MASS
-    }
-
-    /// Convert Schwarzschild radii to meters
-    pub fn schwarzschild_to_meters(rs: f64, mass_solar: f64) -> f64 {
-        rs * 2.0 * G * mass_solar * SOLAR_MASS / (C * C)
-    }
-}

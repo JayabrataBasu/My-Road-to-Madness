@@ -1,6 +1,6 @@
 use winit::{
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::EventLoop,
     window::WindowBuilder,
 };
 
@@ -8,60 +8,54 @@ mod physics;
 mod rendering;
 mod simulation;
 
-use rendering::Renderer;
+use rendering::{RenderQuality, Renderer};
 use simulation::Scene;
 
 fn main() -> anyhow::Result<()> {
-    // Initialize logging
     env_logger::init();
 
-    // Create event loop and window
     let event_loop = EventLoop::new()?;
     let window = WindowBuilder::new()
         .with_title("Black Hole Simulation")
-        .with_inner_size(winit::dpi::PhysicalSize::new(1024, 768))
+        .with_inner_size(winit::dpi::PhysicalSize::new(1280, 720))
         .build(&event_loop)?;
+    let window = std::sync::Arc::new(window);
 
-    // Initialize renderer and scene
-    let mut renderer = pollster::block_on(Renderer::new(&window))?;
+    // Build scene
     let mut scene = Scene::new();
+    use simulation::objects::SimObject;
+    let bh_arc = match &scene.objects[0] {
+        SimObject::BlackHole(bhobj) => bhobj.bh.clone(),
+    };
+    let camera_arc = scene.camera.clone();
+    let mut renderer = pollster::block_on(Renderer::new(
+        &window,
+        RenderQuality::High,
+        camera_arc,
+        bh_arc,
+    ))?;
 
     println!("Black Hole Simulation Started");
-    println!("Controls: Mouse to look around, WASD to move, Esc to quit");
+    println!("Controls: WASD move, wheel = speed, Esc = close (window close)");
 
-    event_loop.run(move |event, target| {
-        match event {
-            Event::WindowEvent { event, window_id } if window_id == window.id() => {
-                match event {
-                    WindowEvent::CloseRequested => target.exit(),
-                    WindowEvent::Resized(size) => {
-                        renderer.resize(size);
-                    }
-                    WindowEvent::RedrawRequested => {
-                        // Update simulation
-                        scene.update();
-
-                        // Render frame
-                        match renderer.render(&scene) {
-                            Ok(_) => {}
-                            Err(e) => eprintln!("Render error: {}", e),
-                        }
-                    }
-                    WindowEvent::KeyboardInput { event, .. } => {
-                        scene.handle_input(&event);
-                    }
-                    WindowEvent::CursorMoved { position, .. } => {
-                        scene.handle_mouse_move(position);
-                    }
-                    _ => {}
+    let win_id = window.id();
+    let win_clone = window.clone();
+    event_loop.run(move |event, target| match event {
+        Event::WindowEvent { event, window_id } if window_id == win_id => match event {
+            WindowEvent::CloseRequested => target.exit(),
+            WindowEvent::Resized(size) => renderer.resize(size),
+            WindowEvent::RedrawRequested => {
+                scene.update();
+                if let Err(e) = renderer.render() {
+                    eprintln!("Render error: {e}");
                 }
             }
-            Event::AboutToWait => {
-                window.request_redraw();
-            }
+            WindowEvent::KeyboardInput { event, .. } => scene.handle_keyboard(&event),
             _ => {}
-        }
+        },
+        Event::DeviceEvent { event, .. } => scene.handle_device_event(&event),
+        Event::AboutToWait => win_clone.request_redraw(),
+        _ => {}
     })?;
-
     Ok(())
 }
