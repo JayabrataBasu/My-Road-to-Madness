@@ -78,6 +78,8 @@ pub struct TimeState {
     pub delta_time: f32,
     pub last_frame_time: std::time::Instant,
     pub simulation_speed: f32,
+    pub frame_count: u64,
+    pub last_fps_instant: std::time::Instant,
 }
 
 impl Default for TimeState {
@@ -87,6 +89,8 @@ impl Default for TimeState {
             delta_time: 0.0,
             last_frame_time: std::time::Instant::now(),
             simulation_speed: 1.0,
+            frame_count: 0,
+            last_fps_instant: std::time::Instant::now(),
         }
     }
 }
@@ -98,5 +102,17 @@ impl TimeState {
             now.duration_since(self.last_frame_time).as_secs_f32() * self.simulation_speed;
         self.current_time += self.delta_time;
         self.last_frame_time = now;
+        self.frame_count += 1;
+    }
+
+    pub fn fps_sample(&mut self) -> Option<f32> {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_fps_instant).as_secs_f32();
+        if elapsed >= 1.0 {
+            let fps = self.frame_count as f32 / elapsed;
+            self.frame_count = 0;
+            self.last_fps_instant = now;
+            Some(fps)
+        } else { None }
     }
 }

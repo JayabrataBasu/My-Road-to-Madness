@@ -13,7 +13,7 @@ pub enum RayTracingQuality {
 
 pub struct RayTracer {
     pub quality: RayTracingQuality,
-    pub camera: Arc<Camera>,
+    pub camera: Arc<std::sync::RwLock<Camera>>,
     pub black_hole: Arc<BlackHole>,
     integrator: GeodesicIntegrator,
     last_camera_version: std::sync::atomic::AtomicU64,
@@ -22,7 +22,7 @@ pub struct RayTracer {
 impl RayTracer {
     pub fn new(
         quality: RayTracingQuality,
-        camera: Arc<Camera>,
+    camera: Arc<std::sync::RwLock<Camera>>,
         black_hole: Arc<BlackHole>,
     ) -> Self {
         Self {
@@ -35,14 +35,14 @@ impl RayTracer {
     }
 
     pub fn trace_frame(&self, framebuffer: &mut [[f32; 4]], width: u32, height: u32) {
-        let cam = &self.camera;
+        let cam_lock = self.camera.read().unwrap();
         framebuffer.par_iter_mut().enumerate().for_each(|(i, px)| {
             let x = (i as u32) % width;
             let y = (i as u32) / width;
             if y >= height {
                 return;
             }
-            let (origin, dir) = cam.screen_to_world_ray(x, y, width, height);
+            let (origin, dir) = cam_lock.screen_to_world_ray(x, y, width, height);
             let color = self.trace_ray(origin, dir);
             let mapped = self.tonemap(color);
             px[0] = mapped[0];

@@ -3,11 +3,11 @@ use crate::rendering::camera::{Camera, CameraController, CameraMode};
 use crate::simulation::objects::{BlackHoleObject, SimObject};
 use crate::simulation::{InputState, TimeState};
 use glam::Vec3;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use winit::event::{DeviceEvent, KeyEvent, MouseScrollDelta, WindowEvent};
 
 pub struct Scene {
-    pub camera: Arc<Camera>,
+    pub camera: Arc<RwLock<Camera>>,
     pub controller: CameraController,
     pub time: TimeState,
     pub input: InputState,
@@ -17,11 +17,11 @@ pub struct Scene {
 impl Scene {
     pub fn new() -> Self {
         let bh = Arc::new(BlackHole::new_schwarzschild(10.0).expect("valid BH"));
-        let camera = Arc::new(Camera::new(
+        let camera = Arc::new(RwLock::new(Camera::new(
             Vec3::new(0.0, 2.0, 10.0),
             Vec3::ZERO,
             16.0 / 9.0,
-        ));
+        )));
         let controller = CameraController::new(CameraMode::Free, Vec3::ZERO);
         let mut objects = Vec::new();
         objects.push(SimObject::BlackHole(BlackHoleObject::new(
@@ -41,26 +41,17 @@ impl Scene {
         self.time.update();
         // Update camera
         // For now create a mutable reference clone of Arc (temporarily clone underlying). This will change when refactoring to interior mutability if needed.
-        if let Some(cam_mut) = Arc::get_mut(&mut self.camera) {
-            self.controller
-                .update(&self.input, self.time.delta_time, cam_mut);
-            // Apply mouse look if any delta
+        {
+            let mut cam = self.camera.write().unwrap();
+            self.controller.update(&self.input, self.time.delta_time, &mut cam);
             let (dx, dy) = self.input.mouse_delta;
             if dx.abs() > 0.0 || dy.abs() > 0.0 {
-                let yaw_delta = dx;
-                let pitch_delta = dy;
-                // Reconstruct right from forward/up
-                let right = cam_mut.forward.cross(cam_mut.up).normalize();
-                // Yaw: rotate forward around world up (Y)
-                let rot_yaw = glam::Quat::from_axis_angle(glam::Vec3::Y, -yaw_delta);
-                let rot_pitch = glam::Quat::from_axis_angle(right, -pitch_delta);
-                let new_forward = (rot_yaw * rot_pitch * cam_mut.forward).normalize();
-                cam_mut.forward = new_forward;
-                cam_mut.right = cam_mut.forward.cross(glam::Vec3::Y).normalize();
-                cam_mut.up = cam_mut.right.cross(cam_mut.forward).normalize();
-                cam_mut.mark_changed();
+                self.controller.yaw -= dx; // invert for typical right-handed feel
+                self.controller.pitch = (self.controller.pitch - dy).clamp(-1.553343, 1.553343); // ~ +/-89 deg
+                cam.set_orientation_from_yaw_pitch(self.controller.yaw, self.controller.pitch);
             }
         }
+        if let Some(fps) = self.time.fps_sample() { log::info!("FPS: {:.1}", fps); }
         self.input.reset_mouse_delta();
     }
 

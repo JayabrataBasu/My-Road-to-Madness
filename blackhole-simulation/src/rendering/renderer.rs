@@ -36,7 +36,7 @@ impl<'w> Renderer<'w> {
     pub async fn new(
         window: &'w Window,
         quality: RenderQuality,
-        camera: Arc<Camera>,
+        camera: Arc<std::sync::RwLock<Camera>>,
         bh: Arc<BlackHole>,
     ) -> Result<Self> {
         let size = window.inner_size();
