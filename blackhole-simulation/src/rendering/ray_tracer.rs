@@ -21,6 +21,7 @@ pub struct RayTracer {
     cached_dims: std::sync::atomic::AtomicU64, // (w<<32)|h
     ray_cache: parking_lot::RwLock<Vec<Vec3>>, // cached directions
     sample_pattern: SamplePattern,
+    mode: RayMode,
 }
 
 #[derive(Clone, Copy)]
@@ -28,6 +29,12 @@ pub enum SamplePattern {
     Halton,
     BlueNoise,
     HaltonBlueCombine,
+}
+
+#[derive(Clone, Copy)]
+pub enum RayMode {
+    Approximate,
+    Geodesic,
 }
 
 // 8x8 Bayer matrix (ordered dithering) normalized to [0,1); serves as a cheap tileable blue-noise-like mask
@@ -51,6 +58,7 @@ impl RayTracer {
             cached_dims: std::sync::atomic::AtomicU64::new(0),
             ray_cache: parking_lot::RwLock::new(Vec::new()),
             sample_pattern: SamplePattern::Halton,
+            mode: RayMode::Approximate,
         }
     }
 
@@ -212,74 +220,52 @@ impl RayTracer {
     }
 
     fn trace_ray(&self, origin: Vec3, dir: Vec3) -> [f32; 3] {
-        // --- Basic physically-inspired placeholder shading for a Schwarzschild BH ---
-        // We treat the black hole at the origin with an accretion disk lying on the XZ plane (y=0).
-        // 1. Build a sky background.
+        match self.mode {
+            RayMode::Approximate => self.trace_ray_approx(origin, dir),
+            RayMode::Geodesic => self.trace_ray_geodesic(origin, dir),
+        }
+    }
+
+    fn trace_ray_approx(&self, origin: Vec3, dir: Vec3) -> [f32; 3] {
         let t = 0.5 * (dir.y + 1.0);
         let mut sky = Vec3::new(0.12, 0.18, 0.35).lerp(Vec3::new(0.95, 0.97, 1.02), t);
-
-        // 2. Lensing darkening: rays closer to the center darken more strongly.
         let focus = dir.normalize().dot((-origin).normalize()).clamp(-1.0, 1.0);
-        let lens_factor = focus.max(0.0).powf(5.0); // steeper falloff
+        let lens_factor = focus.max(0.0).powf(5.0);
         sky *= 1.0 - 0.75 * lens_factor;
-
-        // Physical Schwarzschild radius for the configured mass is gigantic relative to our camera units.
-        // Apply a visual scale so the horizon sits at a few world units for interactive viewing.
-        const BH_VISUAL_SCALE: f32 = 3.5e-5; // tuned so 10 M_sun BH r_s ~ 1.0 scene units
-        let r_s = (self.black_hole.schwarzschild_radius() as f32) * BH_VISUAL_SCALE; // scaled Schwarzschild radius
-        let photon_sphere = (self.black_hole.photon_sphere_radius() as f32) * BH_VISUAL_SCALE; // ~1.5 r_s (scaled)
-        // Precompute some helper vectors
-        let origin_len = origin.length();
-        // (Reserved for future more accurate intersection tests)
-
-        // 3. Analytic ray-sphere test for event horizon (treat horizon as opaque sphere radius r_s).
-        // Ray: O + t D ; Solve |O + tD|^2 = r_s^2.
+        const BH_VISUAL_SCALE: f32 = 3.5e-5;
+        let r_s = (self.black_hole.schwarzschild_radius() as f32) * BH_VISUAL_SCALE;
+        let photon_sphere = (self.black_hole.photon_sphere_radius() as f32) * BH_VISUAL_SCALE;
         let o = origin;
         let d = dir;
         let a = d.length_squared();
         let b = 2.0 * o.dot(d);
         let c = o.length_squared() - r_s * r_s;
         let disc = b * b - 4.0 * a * c;
-        let mut hit_horizon_t = f32::INFINITY;
+        let mut hit_t = f32::INFINITY;
         if disc >= 0.0 {
             let sd = disc.sqrt();
             let t0 = (-b - sd) / (2.0 * a);
             let t1 = (-b + sd) / (2.0 * a);
             if t0 > 0.0 {
-                hit_horizon_t = t0;
+                hit_t = t0;
             } else if t1 > 0.0 {
-                hit_horizon_t = t1;
+                hit_t = t1;
             }
         }
-
-        // 4. Intersect with thin accretion disk plane (y=0). t = -Oy / Dy
         let mut disk_col = Vec3::ZERO;
-        let mut has_disk = false;
         if dir.y.abs() > 1e-5 {
             let t_plane = -origin.y / dir.y;
-            if t_plane > 0.0 && t_plane < hit_horizon_t {
-                // only if in front and before horizon
-                // Position on plane
+            if t_plane > 0.0 && t_plane < hit_t {
                 let p = origin + dir * t_plane;
                 let r = (p.x * p.x + p.z * p.z).sqrt();
                 if r > 1.05 * r_s && r < 30.0 * r_s {
-                    // simple inner/outer radius
-                    // Emission profile ~ r^-3 (thin disk) with clamp
                     let emiss = (1.0 / (r / r_s).powf(3.0)).min(5.0);
-                    // Temperature proxy -> blackbody-ish tint to blue/white
                     let temp = (1.0 / (r / (3.0 * r_s)).max(0.2)).min(2.5);
                     let bb = Vec3::new(1.4 * temp, 1.1 * temp.powf(0.9), temp.powf(0.6));
-                    disk_col = bb * emiss * 0.05; // scale down
-                    // Add crude limb darkening depending on angle
-                    let ndot = (dir.y.abs()).clamp(0.0, 1.0);
-                    disk_col *= 0.3 + 0.7 * ndot;
-                    has_disk = true;
+                    disk_col = bb * emiss * 0.05 * (0.3 + 0.7 * dir.y.abs());
                 }
             }
         }
-
-        // 5. Photon ring enhancement: if ray misses horizon but comes close to photon sphere impact parameter
-        // We approximate by checking closest approach for straight line: distance from origin to ray.
         let to_center = -o;
         let proj = to_center.dot(d);
         let closest = if proj > 0.0 {
@@ -287,43 +273,98 @@ impl RayTracer {
         } else {
             o.length()
         };
-        let mut ring_boost = 0.0;
-        if closest > photon_sphere * 0.95
-            && closest < photon_sphere * 1.05
-            && hit_horizon_t.is_infinite()
-        {
+        let mut ring = 0.0;
+        if closest > photon_sphere * 0.95 && closest < photon_sphere * 1.05 && hit_t.is_infinite() {
             let dist = (closest - photon_sphere).abs() / (0.05 * photon_sphere);
-            ring_boost = (1.0 - dist).clamp(0.0, 1.0);
+            ring = (1.0 - dist).clamp(0.0, 1.0);
         }
-
-        // 6. Combine contributions
-        let mut col = sky;
-        if has_disk {
-            col += disk_col;
+        let mut col = sky + disk_col + Vec3::new(1.5, 1.3, 0.9) * ring * 0.2;
+        if hit_t.is_finite() {
+            col = Vec3::splat(ring * 0.02);
         }
-        if ring_boost > 0.0 {
-            col += Vec3::new(1.5, 1.3, 0.9) * ring_boost * 0.2;
-        }
-
-        // 7. If horizon hit, override with deep black (slightly tinted by ring boost for subtle glow)
-        if hit_horizon_t.is_finite() {
-            col = Vec3::new(0.0, 0.0, 0.0) + Vec3::splat(ring_boost * 0.02);
-        }
-
-        // 8. Gravitational redshift approximation: shift colors based on starting radius (static camera assumption)
-        let r_cam = origin_len; // already in scene units comparable to scaled r_s
+        let r_cam = origin.length();
         if r_cam > 2.0 * r_s {
-            let rs = r_s; // already full Schwarzschild radius
-            let g_fac = (1.0 - rs / r_cam.max(rs + 1e-3)).sqrt().max(0.05);
-            // apply to blue/green more than red
+            let g_fac = (1.0 - r_s / r_cam.max(r_s + 1e-3)).sqrt().max(0.05);
             col = Vec3::new(col.x, col.y * g_fac, col.z * g_fac * 0.6);
         }
-
-        // Mild exposure pre-bias to help visualization
-        col = col.max(Vec3::ZERO);
-        [col.x, col.y, col.z]
+        [col.x.max(0.0), col.y.max(0.0), col.z.max(0.0)]
     }
 
+    fn trace_ray_geodesic(&self, origin: Vec3, dir: Vec3) -> [f32; 3] {
+        const BH_VISUAL_SCALE: f32 = 3.5e-5;
+        let inv_scale = 1.0 / BH_VISUAL_SCALE;
+        let mass = self.black_hole.mass_geometric() as f32;
+        let horizon = self.black_hole.event_horizon_radius() as f32;
+        let photon_sphere = self.black_hole.photon_sphere_radius() as f32;
+        let o_phys = origin * inv_scale;
+        let d_phys = dir.normalize();
+        const STEPS: usize = 500;
+        let mut x = glam::Vec4::new(0.0, o_phys.x, o_phys.y, o_phys.z);
+        let mut p = glam::Vec4::new(1.0, d_phys.x, d_phys.y, d_phys.z);
+        let mut min_r = f32::MAX;
+        let mut disk_hit = false;
+        let mut disk_r = 0.0;
+        let mut disk_pos = Vec3::ZERO;
+        let mut last_y = x.y;
+        for _ in 0..STEPS {
+            let r = (x.y * x.y + x.z * x.z + x.w * x.w).sqrt();
+            if r < min_r {
+                min_r = r;
+            }
+            if r <= horizon {
+                break;
+            }
+            if r > 300.0 * horizon {
+                break;
+            }
+            if !disk_hit && (last_y > 0.0 && x.y <= 0.0 || last_y < 0.0 && x.y >= 0.0) {
+                let rr = (x.z * x.z + x.w * x.w).sqrt();
+                if rr > 1.1 * photon_sphere && rr < 60.0 * photon_sphere {
+                    disk_hit = true;
+                    disk_r = rr;
+                    disk_pos = Vec3::new(x.z, 0.0, x.w);
+                }
+            }
+            last_y = x.y;
+            let inv_r3 = if r > 1e-4 { 1.0 / (r * r * r) } else { 0.0 };
+            let ax = -mass * x.y * inv_r3;
+            let ay = -mass * x.z * inv_r3;
+            let az = -mass * x.w * inv_r3;
+            x.y += p.y * 0.01;
+            x.z += p.z * 0.01;
+            x.w += p.w * 0.01;
+            p.y += ax * 0.01;
+            p.z += ay * 0.01;
+            p.w += az * 0.01;
+        }
+        let mut col = procedural_sky(dir);
+        if min_r <= horizon {
+            col = Vec3::ZERO;
+        } else {
+            if min_r > photon_sphere * 0.97 && min_r < photon_sphere * 1.03 {
+                let t =
+                    1.0 - ((min_r - photon_sphere).abs() / (0.03 * photon_sphere)).clamp(0.0, 1.0);
+                col += Vec3::new(2.5, 2.0, 1.2) * t * 0.4;
+            }
+            if disk_hit {
+                let beta = (mass / disk_r.max(1e-3)).sqrt().min(0.9);
+                let temp = (photon_sphere / disk_r.max(photon_sphere)).powf(0.75);
+                let base = blackbody_approx(temp);
+                let gfac = (1.0 - (2.0 * mass as f32) / disk_r.max(2.0 * mass as f32 + 1e-3))
+                    .sqrt()
+                    .max(0.05);
+                let shifted = Vec3::new(base.x, base.y * gfac, base.z * gfac * 0.7);
+                col = col * 0.5 + shifted * 1.8;
+            }
+        }
+        let focus = dir
+            .normalize()
+            .dot((-origin).normalize())
+            .max(0.0)
+            .powf(6.0);
+        col *= 0.6 + 0.4 * (1.0 - focus);
+        [col.x.max(0.0), col.y.max(0.0), col.z.max(0.0)]
+    }
     fn tonemap(&self, c: [f32; 3]) -> [f32; 3] {
         #[cfg(feature = "aces-tonemap")]
         {
@@ -342,6 +383,33 @@ impl RayTracer {
             [reinhard(c[0]), reinhard(c[1]), reinhard(c[2])]
         }
     }
+}
+
+fn procedural_sky(dir: Vec3) -> Vec3 {
+    let t = 0.5 * (dir.y + 1.0);
+    let base = Vec3::new(0.05, 0.07, 0.10).lerp(Vec3::new(0.65, 0.68, 0.72), t);
+    let h = hash_u64(
+        (dir.x.to_bits() as u64)
+            ^ (dir.y.to_bits() as u64).rotate_left(13)
+            ^ (dir.z.to_bits() as u64).rotate_left(27),
+    );
+    let star_sel = (h & 0xFFFF) as f32 / 65535.0;
+    let star_density = 0.0025;
+    let mut col = base;
+    if star_sel < star_density {
+        let mag = ((h >> 16) & 0xFF) as f32 / 255.0;
+        let tint = Vec3::new(1.0, 0.8 + 0.2 * mag, 0.7 + 0.3 * mag);
+        col += tint * (1.5 + 2.5 * (1.0 - star_sel / star_density));
+    }
+    col
+}
+
+fn blackbody_approx(t: f32) -> Vec3 {
+    let x = (t * 3.0).clamp(0.0, 3.0);
+    let r = (1.5 * x).min(2.5);
+    let g = (x * x + 0.3).min(2.0);
+    let b = (0.5 + 0.9 * (1.0 - (x / 3.0))).max(0.1);
+    Vec3::new(r, g, b) * 0.4
 }
 
 #[inline]
