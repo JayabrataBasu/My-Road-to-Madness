@@ -535,14 +535,17 @@ impl<'w> Renderer<'w> {
                         let px = pen_x + col as i32;
                         let py = pen_y + row as i32;
                         if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
-                            let idx = (py as u32 * w + px as u32) as usize;
-                            let dst = &mut self.framebuffer[idx];
-                            // simple alpha blend
-                            let a = color[3];
-                            dst[0] = dst[0] * (1.0 - a) + color[0] * a;
-                            dst[1] = dst[1] * (1.0 - a) + color[1] * a;
-                            dst[2] = dst[2] * (1.0 - a) + color[2] * a;
-                            dst[3] = 1.0;
+                            let flipped_py = h as i32 - 1 - py;
+                            if flipped_py >= 0 && (flipped_py as u32) < h {
+                                let idx = (flipped_py as u32 * w + px as u32) as usize;
+                                let dst = &mut self.framebuffer[idx];
+                                // simple alpha blend
+                                let a = color[3];
+                                dst[0] = dst[0] * (1.0 - a) + color[0] * a;
+                                dst[1] = dst[1] * (1.0 - a) + color[1] * a;
+                                dst[2] = dst[2] * (1.0 - a) + color[2] * a;
+                                dst[3] = 1.0;
+                            }
                         }
                     }
                 }
