@@ -97,6 +97,12 @@ impl Scene {
                                 SamplePattern::HaltonBlueCombine => SamplePattern::Halton,
                             };
                         }
+                        KeyCode::KeyR => { // recenter camera to look at origin
+                            let mut cam = self.camera.write();
+                            cam.position = glam::Vec3::new(0.0, 2.0, 10.0);
+                            self.controller.yaw = 0.0; self.controller.pitch = 0.0;
+                            cam.set_orientation_from_yaw_pitch(0.0, 0.0);
+                        }
                         _ => {}
                     }
                 }

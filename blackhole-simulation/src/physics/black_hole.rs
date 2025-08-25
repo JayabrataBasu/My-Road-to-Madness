@@ -67,6 +67,13 @@ impl BlackHole {
         }
     }
 
+    /// Photon sphere radius for Schwarzschild: r_ph = 1.5 * r_s (with r_s = 2M).
+    /// For a (non-extremal) Kerr BH this shifts, but we use Schwarzschild value as placeholder.
+    #[inline]
+    pub fn photon_sphere_radius(&self) -> f64 {
+        1.5 * self.schwarzschild_radius()
+    }
+
     // (photon sphere helper removed)
     // Removed unused photon_sphere_radius / ergosphere_radius / is_extremal helpers
 }

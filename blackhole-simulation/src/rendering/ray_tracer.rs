@@ -212,27 +212,115 @@ impl RayTracer {
     }
 
     fn trace_ray(&self, origin: Vec3, dir: Vec3) -> [f32; 3] {
-        // Quick radial distance to approximate horizon darkening
-        let bh_r = self.black_hole.schwarzschild_radius() as f32;
-        let to_origin = origin.length();
+        // --- Basic physically-inspired placeholder shading for a Schwarzschild BH ---
+        // We treat the black hole at the origin with an accretion disk lying on the XZ plane (y=0).
+        // 1. Build a sky background.
         let t = 0.5 * (dir.y + 1.0);
-        let sky = Vec3::new(0.15, 0.2, 0.45).lerp(Vec3::new(0.9, 0.92, 1.0), t);
-        // Very rough lensing hint: if ray nearly points to center, darken
+        let mut sky = Vec3::new(0.12, 0.18, 0.35).lerp(Vec3::new(0.95, 0.97, 1.02), t);
+
+        // 2. Lensing darkening: rays closer to the center darken more strongly.
         let focus = dir.normalize().dot((-origin).normalize()).clamp(-1.0, 1.0);
-        let lens_factor = (focus.max(0.0)).powf(4.0);
-        let mut col = sky * (1.0 - 0.7 * lens_factor);
-        // If within ~event horizon radius along direction (cheap test)
-        if to_origin < 50.0 * bh_r {
-            col *= 0.9;
+        let lens_factor = focus.max(0.0).powf(5.0); // steeper falloff
+        sky *= 1.0 - 0.75 * lens_factor;
+
+        // Physical Schwarzschild radius for the configured mass is gigantic relative to our camera units.
+        // Apply a visual scale so the horizon sits at a few world units for interactive viewing.
+        const BH_VISUAL_SCALE: f32 = 3.5e-5; // tuned so 10 M_sun BH r_s ~ 1.0 scene units
+        let r_s = (self.black_hole.schwarzschild_radius() as f32) * BH_VISUAL_SCALE; // scaled Schwarzschild radius
+        let photon_sphere = (self.black_hole.photon_sphere_radius() as f32) * BH_VISUAL_SCALE; // ~1.5 r_s (scaled)
+        // Precompute some helper vectors
+        let origin_len = origin.length();
+        // (Reserved for future more accurate intersection tests)
+
+        // 3. Analytic ray-sphere test for event horizon (treat horizon as opaque sphere radius r_s).
+        // Ray: O + t D ; Solve |O + tD|^2 = r_s^2.
+        let o = origin;
+        let d = dir;
+        let a = d.length_squared();
+        let b = 2.0 * o.dot(d);
+        let c = o.length_squared() - r_s * r_s;
+        let disc = b * b - 4.0 * a * c;
+        let mut hit_horizon_t = f32::INFINITY;
+        if disc >= 0.0 {
+            let sd = disc.sqrt();
+            let t0 = (-b - sd) / (2.0 * a);
+            let t1 = (-b + sd) / (2.0 * a);
+            if t0 > 0.0 {
+                hit_horizon_t = t0;
+            } else if t1 > 0.0 {
+                hit_horizon_t = t1;
+            }
         }
-        // Approximate gravitational redshift based on radius (static Schwarzschild)
-        let r = origin.length();
-        if r > 2.0 * bh_r {
-            let rs = bh_r * 2.0; // since bh_r ~ r_s/2 earlier? ensure scale
-            let factor = (1.0 - rs / r.max(rs + 1e-3)).sqrt().max(0.1);
-            // shift color towards red & dim
-            col = Vec3::new(col.x * 1.0, col.y * factor, col.z * factor * 0.5);
+
+        // 4. Intersect with thin accretion disk plane (y=0). t = -Oy / Dy
+        let mut disk_col = Vec3::ZERO;
+        let mut has_disk = false;
+        if dir.y.abs() > 1e-5 {
+            let t_plane = -origin.y / dir.y;
+            if t_plane > 0.0 && t_plane < hit_horizon_t {
+                // only if in front and before horizon
+                // Position on plane
+                let p = origin + dir * t_plane;
+                let r = (p.x * p.x + p.z * p.z).sqrt();
+                if r > 1.05 * r_s && r < 30.0 * r_s {
+                    // simple inner/outer radius
+                    // Emission profile ~ r^-3 (thin disk) with clamp
+                    let emiss = (1.0 / (r / r_s).powf(3.0)).min(5.0);
+                    // Temperature proxy -> blackbody-ish tint to blue/white
+                    let temp = (1.0 / (r / (3.0 * r_s)).max(0.2)).min(2.5);
+                    let bb = Vec3::new(1.4 * temp, 1.1 * temp.powf(0.9), temp.powf(0.6));
+                    disk_col = bb * emiss * 0.05; // scale down
+                    // Add crude limb darkening depending on angle
+                    let ndot = (dir.y.abs()).clamp(0.0, 1.0);
+                    disk_col *= 0.3 + 0.7 * ndot;
+                    has_disk = true;
+                }
+            }
         }
+
+        // 5. Photon ring enhancement: if ray misses horizon but comes close to photon sphere impact parameter
+        // We approximate by checking closest approach for straight line: distance from origin to ray.
+        let to_center = -o;
+        let proj = to_center.dot(d);
+        let closest = if proj > 0.0 {
+            (to_center - d * (proj / d.length_squared())).length()
+        } else {
+            o.length()
+        };
+        let mut ring_boost = 0.0;
+        if closest > photon_sphere * 0.95
+            && closest < photon_sphere * 1.05
+            && hit_horizon_t.is_infinite()
+        {
+            let dist = (closest - photon_sphere).abs() / (0.05 * photon_sphere);
+            ring_boost = (1.0 - dist).clamp(0.0, 1.0);
+        }
+
+        // 6. Combine contributions
+        let mut col = sky;
+        if has_disk {
+            col += disk_col;
+        }
+        if ring_boost > 0.0 {
+            col += Vec3::new(1.5, 1.3, 0.9) * ring_boost * 0.2;
+        }
+
+        // 7. If horizon hit, override with deep black (slightly tinted by ring boost for subtle glow)
+        if hit_horizon_t.is_finite() {
+            col = Vec3::new(0.0, 0.0, 0.0) + Vec3::splat(ring_boost * 0.02);
+        }
+
+        // 8. Gravitational redshift approximation: shift colors based on starting radius (static camera assumption)
+        let r_cam = origin_len; // already in scene units comparable to scaled r_s
+        if r_cam > 2.0 * r_s {
+            let rs = r_s; // already full Schwarzschild radius
+            let g_fac = (1.0 - rs / r_cam.max(rs + 1e-3)).sqrt().max(0.05);
+            // apply to blue/green more than red
+            col = Vec3::new(col.x, col.y * g_fac, col.z * g_fac * 0.6);
+        }
+
+        // Mild exposure pre-bias to help visualization
+        col = col.max(Vec3::ZERO);
         [col.x, col.y, col.z]
     }
 

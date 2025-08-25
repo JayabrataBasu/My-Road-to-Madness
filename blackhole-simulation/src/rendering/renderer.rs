@@ -310,7 +310,7 @@ impl<'w> Renderer<'w> {
             }
         }
         if let Some(txt) = hud_text {
-            println!("HUD string: {}", txt);
+            // HUD debug println removed (too noisy). Draw only.
             self.draw_text(txt, 8, 8, [1.0, 1.0, 0.9, 1.0]);
         }
         let frame = self.surface.get_current_texture()?;
