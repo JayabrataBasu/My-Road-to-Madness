@@ -125,6 +125,13 @@ impl Scene {
                             self.controller.pitch = 0.0;
                             cam.mark_changed();
                         }
+                        KeyCode::KeyO => {
+                            // Toggle orbit / free
+                            self.controller.mode = match self.controller.mode {
+                                CameraMode::Free => CameraMode::Orbit,
+                                CameraMode::Orbit => CameraMode::Free,
+                            };
+                        }
                         _ => {}
                     }
                 }
@@ -156,7 +163,7 @@ impl Scene {
             SamplePattern::HaltonBlueCombine => "Hybrid",
         };
         format!(
-            "FPS: {:.1}{}\nSamples: {}  Jitter: {}  Pattern[B]: {}\nPos: ({:.1}, {:.1}, {:.1})\nDir: ({:.2}, {:.2}, {:.2})\nSpeed: {:.1}\n[G] Center Geod: {}  [H] HUD  [P] Pause: {}  [J] Jitter",
+            "FPS: {:.1}{}\nSamples: {}  Jitter: {}  Pattern[B]: {}\nPos: ({:.1}, {:.1}, {:.1})\nDir: ({:.2}, {:.2}, {:.2})\nSpeed: {:.1}  Mode[O]: {:?}  Roll(Q/E): {:.2}\n[G] Center Geod: {}  [H] HUD  [P] Pause: {}  [J] Jitter",
             fps,
             if self.paused { " (PAUSED)" } else { "" },
             self.samples,
@@ -169,6 +176,8 @@ impl Scene {
             cam.forward.y,
             cam.forward.z,
             self.controller.speed,
+            self.controller.mode,
+            self.controller.roll,
             if self.show_center_geodesic {
                 "ON"
             } else {

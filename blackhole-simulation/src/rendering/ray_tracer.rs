@@ -22,6 +22,7 @@ pub struct RayTracer {
     ray_cache: parking_lot::RwLock<Vec<Vec3>>, // cached directions
     sample_pattern: SamplePattern,
     mode: RayMode,
+    frame_index: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Copy)]
@@ -59,6 +60,7 @@ impl RayTracer {
             ray_cache: parking_lot::RwLock::new(Vec::new()),
             sample_pattern: SamplePattern::Halton,
             mode: RayMode::Approximate,
+            frame_index: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -77,6 +79,8 @@ impl RayTracer {
         center_geod: bool,
         jitter_seed: Option<u64>,
     ) {
+        self.frame_index
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let cam_lock = self.camera.read();
         let cam_version = cam_lock.version;
         let packed_dims = ((width as u64) << 32) | height as u64;
@@ -227,14 +231,21 @@ impl RayTracer {
     }
 
     fn trace_ray_approx(&self, origin: Vec3, dir: Vec3) -> [f32; 3] {
+        // Background sky with subtle lens darkening
         let t = 0.5 * (dir.y + 1.0);
-        let mut sky = Vec3::new(0.10, 0.13, 0.22).lerp(Vec3::new(1.1, 1.05, 1.2), t);
+        let mut sky = Vec3::new(0.02, 0.025, 0.04).lerp(Vec3::new(0.25, 0.27, 0.30), t);
+        // Add richer starfield BEFORE disk so disk occludes it naturally
+        sky += rich_starfield(dir);
         let focus = dir.normalize().dot((-origin).normalize()).clamp(-1.0, 1.0);
-        let lens_factor = focus.max(0.0).powf(5.0);
-        sky *= 1.0 - 0.7 * lens_factor;
+        let lens_factor = focus.max(0.0).powf(3.5);
+        sky *= 1.0 - 0.45 * lens_factor; // keep some brightness for stars
+
+        // Black hole scale references
         const BH_VISUAL_SCALE: f32 = 3.5e-5;
         let r_s = (self.black_hole.schwarzschild_radius() as f32) * BH_VISUAL_SCALE;
         let photon_sphere = (self.black_hole.photon_sphere_radius() as f32) * BH_VISUAL_SCALE;
+
+        // Simple sphere test (for horizon silhouette)
         let o = origin;
         let d = dir;
         let a = d.length_squared();
@@ -252,21 +263,67 @@ impl RayTracer {
                 hit_t = t1;
             }
         }
+
+        // Rotating accretion disk (reduced outer radius so we can SEE stars around it)
         let mut disk_col = Vec3::ZERO;
-        if dir.y.abs() > 1e-5 {
-            let t_plane = -origin.y / dir.y;
+        if dir.y.abs() > 1e-6 {
+            let frame = self.frame_index.load(std::sync::atomic::Ordering::Relaxed) as f32;
+            let rot = frame * 0.008; // rotation speed
+            let sin_a = rot.sin();
+            let cos_a = rot.cos();
+            let t_plane = -origin.y / dir.y; // plane y=0
             if t_plane > 0.0 && t_plane < hit_t {
                 let p = origin + dir * t_plane;
-                let r = (p.x * p.x + p.z * p.z).sqrt();
-                if r > 1.05 * r_s && r < 30.0 * r_s {
-                    // Stronger emission and color for visual impact
-                    let emiss = (1.0 / (r / r_s).powf(2.2)).min(10.0);
-                    let temp = (1.5 / (r / (2.5 * r_s)).max(0.15)).min(3.5);
-                    let bb = Vec3::new(2.5 * temp, 1.7 * temp.powf(0.9), 1.2 * temp.powf(0.6));
-                    disk_col = bb * emiss * 0.12 * (0.4 + 0.6 * dir.y.abs());
+                let mut xz = glam::Vec2::new(p.x, p.z);
+                // Rotate texture space for disk animation
+                xz = glam::Vec2::new(cos_a * xz.x - sin_a * xz.y, sin_a * xz.x + cos_a * xz.y);
+                let r = xz.length();
+                let inner = 1.15 * r_s;
+                let outer = 140.0 * r_s; // narrower so background shows
+                if r > inner && r < outer {
+                    // Flared vertical thickness h(r) and ray intersection thickness weight
+                    let h_r = (0.15 * r.powf(0.6)).min(30.0 * r_s).max(0.2 * r_s);
+                    let y_local = (origin.y + dir.y * t_plane).abs();
+                    let thick = (1.0 - (y_local / h_r)).clamp(0.0, 1.0).powf(2.0);
+                    if thick > 0.0 {
+                        // Emissivity ~ r^-q with soft inner core clamp
+                        let q = 2.2;
+                        let emiss = ((r / (4.0 * r_s)).max(0.35).powf(-q)).min(25.0) * thick;
+                        // Temperature profile (normalized for color ramp)
+                        let temp = (outer / r).powf(0.55).min(32.0);
+                        let t_norm = (temp / 40.0).clamp(0.0, 1.0);
+                        // Color ramp hot (inner) -> cool (outer)
+                        let hot = Vec3::new(2.8, 2.4, 2.2);
+                        let cool = Vec3::new(1.0, 0.9, 0.55);
+                        let base = cool.lerp(hot, t_norm.powf(0.8));
+                        // Approx Keplerian velocity & Doppler beaming
+                        let beta = (r_s / (2.0 * r)).sqrt().min(0.7);
+                        let gamma = 1.0 / (1.0 - beta * beta).sqrt();
+                        // Tangential velocity direction (counter-clockwise in rotated frame)
+                        let vx = -xz.y / r;
+                        let vz = xz.x / r;
+                        let vel_dir =
+                            Vec3::new(cos_a * vx - sin_a * vz, 0.0, sin_a * vx + cos_a * vz);
+                        let view_dir = -dir.normalize();
+                        let cos_th = vel_dir.dot(view_dir).clamp(-1.0, 1.0);
+                        let doppler = (gamma * (1.0 - beta * cos_th)).max(0.05);
+                        let boost = doppler.powf(-3.0);
+                        // Saturation fades with radius
+                        let sat = (1.0 - (r / outer)).clamp(0.0, 1.0).powf(0.3);
+                        let base_sat = Vec3::new(
+                            base.x,
+                            base.y * (0.5 + 0.5 * sat),
+                            base.z * (0.4 + 0.6 * sat),
+                        );
+                        // Radial fade so edge blends into space
+                        let edge = ((outer - r) / (outer - inner)).clamp(0.0, 1.0).powf(1.5);
+                        disk_col = base_sat * emiss * boost * 0.018 * edge;
+                    }
                 }
             }
         }
+
+        // Photon ring heuristic (only if ray misses horizon) broadened for visibility
         let to_center = -o;
         let proj = to_center.dot(d);
         let closest = if proj > 0.0 {
@@ -275,14 +332,18 @@ impl RayTracer {
             o.length()
         };
         let mut ring = 0.0;
-        if closest > photon_sphere * 0.95 && closest < photon_sphere * 1.05 && hit_t.is_infinite() {
-            let dist = (closest - photon_sphere).abs() / (0.05 * photon_sphere);
-            ring = (1.0 - dist).clamp(0.0, 1.0);
+        if closest > photon_sphere * 0.93 && closest < photon_sphere * 1.08 && hit_t.is_infinite() {
+            let dist = (closest - photon_sphere).abs() / (0.08 * photon_sphere);
+            ring = (1.0 - dist).clamp(0.0, 1.0).powf(1.3);
         }
-        let mut col = sky + disk_col + Vec3::new(1.5, 1.3, 0.9) * ring * 0.2;
+
+        // Combine components
+        let mut col = sky + disk_col + Vec3::new(2.6, 2.3, 1.7) * ring * 0.32;
         if hit_t.is_finite() {
             col = Vec3::splat(ring * 0.02);
         }
+
+        // Gravitational redshift approximation (desaturate & dim green/blue based on camera radius)
         let r_cam = origin.length();
         if r_cam > 2.0 * r_s {
             let g_fac = (1.0 - r_s / r_cam.max(r_s + 1e-3)).sqrt().max(0.05);
@@ -305,7 +366,6 @@ impl RayTracer {
         let mut min_r = f32::MAX;
         let mut disk_hit = false;
         let mut disk_r = 0.0;
-        let mut disk_pos = Vec3::ZERO;
         let mut last_y = x.y;
         for _ in 0..STEPS {
             let r = (x.y * x.y + x.z * x.z + x.w * x.w).sqrt();
@@ -323,7 +383,6 @@ impl RayTracer {
                 if rr > 1.1 * photon_sphere && rr < 60.0 * photon_sphere {
                     disk_hit = true;
                     disk_r = rr;
-                    disk_pos = Vec3::new(x.z, 0.0, x.w);
                 }
             }
             last_y = x.y;
@@ -348,7 +407,6 @@ impl RayTracer {
                 col += Vec3::new(2.5, 2.0, 1.2) * t * 0.4;
             }
             if disk_hit {
-                let beta = (mass / disk_r.max(1e-3)).sqrt().min(0.9);
                 let temp = (photon_sphere / disk_r.max(photon_sphere)).powf(0.75);
                 let base = blackbody_approx(temp);
                 let gfac = (1.0 - (2.0 * mass as f32) / disk_r.max(2.0 * mass as f32 + 1e-3))
@@ -403,6 +461,48 @@ fn procedural_sky(dir: Vec3) -> Vec3 {
         col += tint * (1.5 + 2.5 * (1.0 - star_sel / star_density));
     }
     col
+}
+
+// Enhanced multi-layer starfield with varied magnitudes and subtle color tints
+fn rich_starfield(dir: Vec3) -> Vec3 {
+    // Hash direction to pseudo-random
+    let h = hash_u64(
+        (dir.x.to_bits() as u64)
+            ^ (dir.y.to_bits() as u64).rotate_left(17)
+            ^ (dir.z.to_bits() as u64).rotate_left(29),
+    );
+    // Use several low-probability channels
+    let r0 = (h & 0xFFFF) as f32 / 65535.0; // selection
+    let r1 = ((h >> 16) & 0xFFFF) as f32 / 65535.0; // magnitude
+    let r2 = ((h >> 32) & 0xFFFF) as f32 / 65535.0; // color mix
+    let r3 = ((h >> 48) & 0xFFFF) as f32 / 65535.0; // layer
+
+    // Base density
+    let base_density = 0.006; // more stars
+    if r0 > base_density {
+        return Vec3::ZERO;
+    }
+
+    // Layer weighting: faint (most), medium, bright, rare super-bright
+    let (mag_scale, color_bias, flicker) = if r3 < 0.80 {
+        (1.0, 0.4, 0.3)
+    } else if r3 < 0.95 {
+        (2.2, 0.6, 0.5)
+    } else if r3 < 0.995 {
+        (4.0, 0.9, 0.8)
+    } else {
+        (8.0, 1.3, 1.0) // rare bright star
+    };
+
+    // Magnitude (brighter for lower r1)
+    let mag = (1.0 - r1).powf(2.2) * mag_scale;
+    // Temperature-ish tint: mix between warm and cool
+    let warm = Vec3::new(1.0, 0.85, 0.7);
+    let cool = Vec3::new(0.7, 0.8, 1.0);
+    let tint = warm.lerp(cool, r2);
+    // Add subtle flicker based on hashed variation (static for now)
+    let intensity = 0.8 + 0.2 * flicker;
+    tint * mag * intensity * color_bias * 0.5
 }
 
 fn blackbody_approx(t: f32) -> Vec3 {

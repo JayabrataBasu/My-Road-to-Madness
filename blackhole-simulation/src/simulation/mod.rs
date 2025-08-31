@@ -20,6 +20,8 @@ pub struct InputState {
     pub right: bool,
     pub up: bool,
     pub down: bool,
+    pub roll_left: bool,
+    pub roll_right: bool,
     pub mouse_delta: (f32, f32),
 }
 
@@ -32,8 +34,9 @@ impl Default for InputState {
             right: false,
             up: false,
             down: false,
+            roll_left: false,
+            roll_right: false,
             mouse_delta: (0.0, 0.0),
-            
         }
     }
 }
@@ -50,6 +53,8 @@ impl InputState {
                 KeyCode::KeyD | KeyCode::ArrowRight => self.right = pressed,
                 KeyCode::Space => self.up = pressed,
                 KeyCode::ShiftLeft | KeyCode::ShiftRight => self.down = pressed,
+                KeyCode::KeyQ => self.roll_left = pressed,
+                KeyCode::KeyE => self.roll_right = pressed,
                 _ => {}
             }
         }
@@ -104,6 +109,8 @@ impl TimeState {
             self.frame_count = 0;
             self.last_fps_instant = now;
             Some(fps)
-        } else { None }
+        } else {
+            None
+        }
     }
 }

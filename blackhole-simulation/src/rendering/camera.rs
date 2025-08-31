@@ -103,6 +103,7 @@ impl Camera {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraMode {
     Free,
     Orbit,
@@ -113,6 +114,7 @@ pub struct CameraController {
     pub orbit_target: Vec3,
     pub yaw: f32,
     pub pitch: f32,
+    pub roll: f32,
     pub speed: f32,
     pub sensitivity: f32,
 }
@@ -124,6 +126,7 @@ impl CameraController {
             orbit_target,
             yaw: 0.0,
             pitch: 0.0,
+            roll: 0.0,
             speed: 2.0,
             sensitivity: 0.002,
         }
@@ -160,14 +163,45 @@ impl CameraController {
             cam.position += dir.normalize() * self.speed * dt;
             cam.mark_changed();
         }
+        // Apply roll to orientation if changed externally
+        if input.roll_left || input.roll_right {
+            let roll_delta = (input.roll_right as i32 - input.roll_left as i32) as f32 * dt * 1.5; // radians/sec
+            self.roll += roll_delta;
+            // Recompute basis with yaw/pitch + roll
+            let cp = self.pitch.cos();
+            let sp = self.pitch.sin();
+            let cy = self.yaw.cos();
+            let sy = self.yaw.sin();
+            let fwd = glam::Vec3::new(cy * cp, sp, -sy * cp).normalize();
+            // Start with standard right/up then roll them
+            let mut right = fwd.cross(glam::Vec3::Y).normalize();
+            let mut up = right.cross(fwd).normalize();
+            if self.roll.abs() > 1e-6 {
+                let cr = self.roll.cos();
+                let sr = self.roll.sin();
+                // rotate right & up around forward
+                let new_right = right * cr + up * sr;
+                let new_up = up * cr - right * sr;
+                right = new_right.normalize();
+                up = new_up.normalize();
+            }
+            cam.forward = fwd;
+            cam.right = right;
+            cam.up = up;
+            cam.mark_changed();
+        }
     }
 
     fn update_orbit(&mut self, dt: f32, cam: &mut Camera) {
         let radius = (cam.position - self.orbit_target).length().max(0.1);
-        self.yaw += dt * 0.2;
-        let x = self.orbit_target.x + radius * self.yaw.cos();
-        let z = self.orbit_target.z + radius * self.yaw.sin();
-        cam.position = Vec3::new(x, cam.position.y, z);
+        self.yaw += dt * 0.25; // slow automatic yaw
+        // Allow vertical inclination change using pitch for orbit
+        let inclination = self.pitch.clamp(-1.2, 1.2);
+        let y = self.orbit_target.y + radius * inclination.sin();
+        let flat_r = radius * inclination.cos();
+        let x = self.orbit_target.x + flat_r * self.yaw.cos();
+        let z = self.orbit_target.z + flat_r * self.yaw.sin();
+        cam.position = Vec3::new(x, y, z);
         cam.forward = (self.orbit_target - cam.position).normalize();
         cam.right = cam.forward.cross(Vec3::Y).normalize();
         cam.up = cam.right.cross(cam.forward).normalize();
