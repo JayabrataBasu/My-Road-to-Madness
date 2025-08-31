@@ -23,6 +23,11 @@ pub struct InputState {
     pub roll_left: bool,
     pub roll_right: bool,
     pub mouse_delta: (f32, f32),
+    pub increase_disk_radius: bool,
+    pub decrease_disk_radius: bool,
+    pub increase_disk_thickness: bool,
+    pub decrease_disk_thickness: bool,
+    pub toggle_star_brightness: bool,
 }
 
 impl Default for InputState {
@@ -37,6 +42,11 @@ impl Default for InputState {
             roll_left: false,
             roll_right: false,
             mouse_delta: (0.0, 0.0),
+            increase_disk_radius: false,
+            decrease_disk_radius: false,
+            increase_disk_thickness: false,
+            decrease_disk_thickness: false,
+            toggle_star_brightness: false,
         }
     }
 }
@@ -55,6 +65,11 @@ impl InputState {
                 KeyCode::ShiftLeft | KeyCode::ShiftRight => self.down = pressed,
                 KeyCode::KeyQ => self.roll_left = pressed,
                 KeyCode::KeyE => self.roll_right = pressed,
+                KeyCode::Digit1 => self.decrease_disk_radius = pressed,
+                KeyCode::Digit2 => self.increase_disk_radius = pressed,
+                KeyCode::Digit3 => self.decrease_disk_thickness = pressed,
+                KeyCode::Digit4 => self.increase_disk_thickness = pressed,
+                KeyCode::KeyV => if pressed { self.toggle_star_brightness = true; },
                 _ => {}
             }
         }

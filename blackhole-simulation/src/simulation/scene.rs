@@ -22,6 +22,9 @@ pub struct Scene {
     pub jitter: bool,
     pub samples: u32,
     pub sample_pattern: SamplePattern,
+    pub disk_outer_scale: f32,
+    pub disk_thickness_scale: f32,
+    pub star_brightness: f32,
 }
 
 impl Scene {
@@ -51,12 +54,37 @@ impl Scene {
             jitter: true,
             samples: 0,
             sample_pattern: SamplePattern::Halton,
+            disk_outer_scale: 1.0,
+            disk_thickness_scale: 1.0,
+            star_brightness: 1.0,
         }
     }
 
     pub fn update(&mut self) {
         if !self.paused {
             self.time.update();
+        }
+        // Handle one-shot star brightness toggle
+        if self.input.toggle_star_brightness {
+            self.star_brightness = if (self.star_brightness - 1.0).abs() < 0.01 {
+                0.3
+            } else {
+                1.0
+            };
+            self.input.toggle_star_brightness = false;
+        }
+        // Adjust disk parameters
+        if self.input.increase_disk_radius {
+            self.disk_outer_scale = (self.disk_outer_scale * 1.02).min(5.0);
+        }
+        if self.input.decrease_disk_radius {
+            self.disk_outer_scale = (self.disk_outer_scale / 1.02).max(0.2);
+        }
+        if self.input.increase_disk_thickness {
+            self.disk_thickness_scale = (self.disk_thickness_scale * 1.02).min(5.0);
+        }
+        if self.input.decrease_disk_thickness {
+            self.disk_thickness_scale = (self.disk_thickness_scale / 1.02).max(0.2);
         }
         // Update camera
         // For now create a mutable reference clone of Arc (temporarily clone underlying). This will change when refactoring to interior mutability if needed.
@@ -163,7 +191,7 @@ impl Scene {
             SamplePattern::HaltonBlueCombine => "Hybrid",
         };
         format!(
-            "FPS: {:.1}{}\nSamples: {}  Jitter: {}  Pattern[B]: {}\nPos: ({:.1}, {:.1}, {:.1})\nDir: ({:.2}, {:.2}, {:.2})\nSpeed: {:.1}  Mode[O]: {:?}  Roll(Q/E): {:.2}\n[G] Center Geod: {}  [H] HUD  [P] Pause: {}  [J] Jitter",
+            "FPS: {:.1}{}\nSamples: {}  Jitter: {}  Pattern[B]: {}\nPos: ({:.1}, {:.1}, {:.1})\nDir: ({:.2}, {:.2}, {:.2})\nSpeed: {:.1}  Mode[O]: {:?}  Roll(Q/E): {:.2}\nDisk R[1/2]: {:.2}  Thick[3/4]: {:.2}  Stars[V]: {:.1}\n[G] Center Geod: {}  [H] HUD  [P] Pause: {}  [J] Jitter",
             fps,
             if self.paused { " (PAUSED)" } else { "" },
             self.samples,
@@ -178,6 +206,9 @@ impl Scene {
             self.controller.speed,
             self.controller.mode,
             self.controller.roll,
+            self.disk_outer_scale,
+            self.disk_thickness_scale,
+            self.star_brightness,
             if self.show_center_geodesic {
                 "ON"
             } else {

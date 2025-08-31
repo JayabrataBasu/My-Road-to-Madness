@@ -23,6 +23,10 @@ pub struct RayTracer {
     sample_pattern: SamplePattern,
     mode: RayMode,
     frame_index: std::sync::atomic::AtomicU64,
+    // Dynamic visual parameters (set externally each frame)
+    pub disk_outer_scale: std::sync::atomic::AtomicU32, // stores f32 bits
+    pub disk_thickness_scale: std::sync::atomic::AtomicU32, // stores f32 bits
+    pub star_brightness: std::sync::atomic::AtomicU32,  // stores f32 bits
 }
 
 #[derive(Clone, Copy)]
@@ -61,7 +65,24 @@ impl RayTracer {
             sample_pattern: SamplePattern::Halton,
             mode: RayMode::Approximate,
             frame_index: std::sync::atomic::AtomicU64::new(0),
+            disk_outer_scale: std::sync::atomic::AtomicU32::new(1.0f32.to_bits()),
+            disk_thickness_scale: std::sync::atomic::AtomicU32::new(1.0f32.to_bits()),
+            star_brightness: std::sync::atomic::AtomicU32::new(1.0f32.to_bits()),
         }
+    }
+
+    pub fn update_dynamic_params(&self, disk_r: f32, disk_thick: f32, star_b: f32) {
+        self.disk_outer_scale
+            .store(disk_r.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        self.disk_thickness_scale
+            .store(disk_thick.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        self.star_brightness
+            .store(star_b.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn load_f32(atom: &std::sync::atomic::AtomicU32) -> f32 {
+        f32::from_bits(atom.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     pub fn set_sample_pattern(&mut self, pattern: SamplePattern) {
@@ -81,6 +102,7 @@ impl RayTracer {
     ) {
         self.frame_index
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Caller should update dynamic params each frame; if not, old values persist.
         let cam_lock = self.camera.read();
         let cam_version = cam_lock.version;
         let packed_dims = ((width as u64) << 32) | height as u64;
@@ -233,9 +255,19 @@ impl RayTracer {
     fn trace_ray_approx(&self, origin: Vec3, dir: Vec3) -> [f32; 3] {
         // Background sky with subtle lens darkening
         let t = 0.5 * (dir.y + 1.0);
-        let mut sky = Vec3::new(0.02, 0.025, 0.04).lerp(Vec3::new(0.25, 0.27, 0.30), t);
-        // Add richer starfield BEFORE disk so disk occludes it naturally
-        sky += rich_starfield(dir);
+        let mut sky = Vec3::new(0.005, 0.006, 0.01).lerp(Vec3::new(0.10, 0.11, 0.12), t);
+        // Lensing-warp background direction for sampling stars (very approximate Schwarzschild deflection)
+        // Compute impact parameter b ~ |o x d| / |d|
+        let bh_dir_to_cam = (-origin).normalize();
+        // Defer r_s fetch until after BH scale constants below if needed
+        // Add richer starfield with warp
+        let star_b = Self::load_f32(&self.star_brightness);
+        let warped_dir = {
+            // We'll get r_s after computing scale (duplicate small code here avoided by later replace)
+            // Placeholder replaced below after r_s is defined
+            dir
+        };
+        sky += rich_starfield(warped_dir) * star_b;
         let focus = dir.normalize().dot((-origin).normalize()).clamp(-1.0, 1.0);
         let lens_factor = focus.max(0.0).powf(3.5);
         sky *= 1.0 - 0.45 * lens_factor; // keep some brightness for stars
@@ -244,6 +276,22 @@ impl RayTracer {
         const BH_VISUAL_SCALE: f32 = 3.5e-5;
         let r_s = (self.black_hole.schwarzschild_radius() as f32) * BH_VISUAL_SCALE;
         let photon_sphere = (self.black_hole.photon_sphere_radius() as f32) * BH_VISUAL_SCALE;
+        // Now that we have r_s, compute warped background direction (override earlier placeholder)
+        let warped_dir = {
+            let b = origin.cross(dir).length(); // since |dir| ~1
+            let mut alpha = 2.0 * r_s / b.max(1e-6); // weak field deflection
+            // Intensify near photon sphere (b ~ sqrt(27)/2 r_s ~ 2.598 r_s)
+            let b_norm = b / (1.5 * photon_sphere);
+            if b_norm < 1.2 {
+                alpha *= 1.0 + (1.2 - b_norm).max(0.0).powf(2.5) * 4.0;
+            }
+            alpha = alpha.min(0.8);
+            // Bend direction toward BH center
+            let bent = (dir * (1.0 - alpha) + bh_dir_to_cam * alpha).normalize();
+            bent
+        };
+        // Re-evaluate star contribution with warped_dir (add delta)
+        sky += rich_starfield(warped_dir) * star_b * 0.5; // half strength additive warp detail
 
         // Simple sphere test (for horizon silhouette)
         let o = origin;
@@ -264,8 +312,9 @@ impl RayTracer {
             }
         }
 
-        // Rotating accretion disk (reduced outer radius so we can SEE stars around it)
+        // Rotating volumetric accretion disk (multi-layer sample integration)
         let mut disk_col = Vec3::ZERO;
+        let mut disk_secondary = Vec3::ZERO; // lensed secondary image
         if dir.y.abs() > 1e-6 {
             let frame = self.frame_index.load(std::sync::atomic::Ordering::Relaxed) as f32;
             let rot = frame * 0.008; // rotation speed
@@ -279,51 +328,132 @@ impl RayTracer {
                 xz = glam::Vec2::new(cos_a * xz.x - sin_a * xz.y, sin_a * xz.x + cos_a * xz.y);
                 let r = xz.length();
                 let inner = 1.15 * r_s;
-                let outer = 140.0 * r_s; // narrower so background shows
+                let base_outer = 140.0 * r_s * Self::load_f32(&self.disk_outer_scale);
+                let outer = base_outer.min(600.0 * r_s).max(20.0 * r_s);
                 if r > inner && r < outer {
-                    // Flared vertical thickness h(r) and ray intersection thickness weight
-                    let h_r = (0.15 * r.powf(0.6)).min(30.0 * r_s).max(0.2 * r_s);
-                    let y_local = (origin.y + dir.y * t_plane).abs();
-                    let thick = (1.0 - (y_local / h_r)).clamp(0.0, 1.0).powf(2.0);
-                    if thick > 0.0 {
-                        // Emissivity ~ r^-q with soft inner core clamp
-                        let q = 2.2;
-                        let emiss = ((r / (4.0 * r_s)).max(0.35).powf(-q)).min(25.0) * thick;
-                        // Temperature profile (normalized for color ramp)
-                        let temp = (outer / r).powf(0.55).min(32.0);
-                        let t_norm = (temp / 40.0).clamp(0.0, 1.0);
-                        // Color ramp hot (inner) -> cool (outer)
-                        let hot = Vec3::new(2.8, 2.4, 2.2);
-                        let cool = Vec3::new(1.0, 0.9, 0.55);
-                        let base = cool.lerp(hot, t_norm.powf(0.8));
-                        // Approx Keplerian velocity & Doppler beaming
-                        let beta = (r_s / (2.0 * r)).sqrt().min(0.7);
+                    // Sample N vertical layers for volumetric look
+                    let layer_count = 6;
+                    let thickness_scale = Self::load_f32(&self.disk_thickness_scale);
+                    let h_r = (0.12 * r.powf(0.62) * thickness_scale)
+                        .min(40.0 * r_s)
+                        .max(0.2 * r_s);
+                    let mut accum = Vec3::ZERO;
+                    let mut total_alpha = 0.0;
+                    for li in 0..layer_count {
+                        let lf = (li as f32 + 0.5) / layer_count as f32; // 0..1
+                        // Map to -1..1 vertical sample
+                        let vz = lf * 2.0 - 1.0;
+                        // density profile ~ exp(-(|y|/h)^2)
+                        let local_y = vz * h_r;
+                        let y_world = local_y; // disk centered at y=0
+                        let y_ray = origin.y + dir.y * t_plane;
+                        // Weight by proximity of ray-plane intersection to this layer
+                        let layer_w = ((1.0 - ((y_ray - y_world).abs() / (h_r)).powf(2.0))
+                            .max(0.0))
+                        .powf(2.5);
+                        if layer_w <= 0.0 {
+                            continue;
+                        }
+                        let vertical_density = (-vz * vz * 3.0).exp();
+                        // Emissivity & temperature
+                        let q = 2.1;
+                        let emiss = ((r / (4.5 * r_s)).max(0.35).powf(-q)).min(30.0);
+                        let temp_inner = 1.0;
+                        let temp_mid = 0.6;
+                        let temp_outer = 0.35;
+                        let rn = (r - inner) / (outer - inner);
+                        // Blend three blackbodies
+                        let bb_inner = blackbody_rgb(12000.0 * temp_inner);
+                        let bb_mid = blackbody_rgb(6500.0 * temp_mid);
+                        let bb_outer = blackbody_rgb(4000.0 * temp_outer);
+                        let bbmix = if rn < 0.3 {
+                            bb_inner.lerp(bb_mid, rn / 0.3)
+                        } else if rn < 0.75 {
+                            bb_mid.lerp(bb_outer, (rn - 0.3) / 0.45)
+                        } else {
+                            bb_outer * (1.0 - (rn - 0.75) * 0.6)
+                        };
+                        // Add subtle turbulent pattern (azimuthal + radial)
+                        let angle = xz.y.atan2(xz.x);
+                        let ring_mod = ((r / (4.0 * r_s)).sin() * 0.5 + 0.5).powf(0.7);
+                        let az_mod = ((angle * 10.0 + frame * 0.02).sin() * 0.5 + 0.5).powf(1.5);
+                        let texture_mod = 0.6 + 0.4 * ring_mod * az_mod;
+                        // Doppler beaming per layer (same velocity)
+                        let beta = (r_s / (2.0 * r)).sqrt().min(0.65);
                         let gamma = 1.0 / (1.0 - beta * beta).sqrt();
-                        // Tangential velocity direction (counter-clockwise in rotated frame)
                         let vx = -xz.y / r;
-                        let vz = xz.x / r;
+                        let vzx = xz.x / r;
                         let vel_dir =
-                            Vec3::new(cos_a * vx - sin_a * vz, 0.0, sin_a * vx + cos_a * vz);
+                            Vec3::new(cos_a * vx - sin_a * vzx, 0.0, sin_a * vx + cos_a * vzx);
                         let view_dir = -dir.normalize();
                         let cos_th = vel_dir.dot(view_dir).clamp(-1.0, 1.0);
                         let doppler = (gamma * (1.0 - beta * cos_th)).max(0.05);
-                        let boost = doppler.powf(-3.0);
-                        // Saturation fades with radius
-                        let sat = (1.0 - (r / outer)).clamp(0.0, 1.0).powf(0.3);
-                        let base_sat = Vec3::new(
-                            base.x,
-                            base.y * (0.5 + 0.5 * sat),
-                            base.z * (0.4 + 0.6 * sat),
-                        );
-                        // Radial fade so edge blends into space
-                        let edge = ((outer - r) / (outer - inner)).clamp(0.0, 1.0).powf(1.5);
-                        disk_col = base_sat * emiss * boost * 0.018 * edge;
+                        // Softer Doppler beaming (was -3.0) to avoid star-like hotspot
+                        let boost = doppler.powf(-2.2);
+                        // Simple optical depth accumulation (front-to-back since single plane)
+                        let layer_color =
+                            bbmix * emiss * boost * vertical_density * layer_w * texture_mod;
+                        let alpha = (vertical_density * layer_w * 0.25).clamp(0.0, 1.0);
+                        accum = accum + layer_color * (1.0 - total_alpha);
+                        total_alpha += alpha * (1.0 - total_alpha);
+                        if total_alpha > 0.98 {
+                            break;
+                        }
+                    }
+                    // Edge fade
+                    let edge = ((outer - r) / (outer - inner)).clamp(0.0, 1.0).powf(1.3);
+                    disk_col = accum * edge * 0.02;
+                    // Blend a warm rim tint near the ISCO to visually merge with photon ring
+                    let inner_blend = ((r - inner) / (inner * 0.7)).clamp(0.0, 1.0);
+                    let rim_mix = 1.0 - inner_blend;
+                    let rim_tint =
+                        blackbody_rgb(13500.0).lerp(Vec3::new(2.4, 2.1, 1.6), 0.4) * 0.18;
+                    disk_col += rim_tint * rim_mix * edge;
+                }
+            }
+            // Secondary (lensed) disk image approximation: reflect ray if it passes above disk near BH
+            if dir.y > 0.0 {
+                let closest = {
+                    let proj = (-origin).dot(dir);
+                    if proj > 0.0 {
+                        (-origin - dir * (proj / dir.length_squared())).length()
+                    } else {
+                        origin.length()
+                    }
+                };
+                if closest < 4.0 * r_s {
+                    // near BH
+                    // Mirror ray across mid-plane
+                    let mut d_mirror = dir;
+                    d_mirror.y = -d_mirror.y.abs();
+                    if d_mirror.y.abs() > 1e-6 {
+                        let t_plane2 = -origin.y / d_mirror.y;
+                        if t_plane2 > 0.0 {
+                            let p2 = origin + d_mirror * t_plane2;
+                            let mut xz2 = glam::Vec2::new(p2.x, p2.z);
+                            xz2 = glam::Vec2::new(
+                                cos_a * xz2.x - sin_a * xz2.y,
+                                sin_a * xz2.x + cos_a * xz2.y,
+                            );
+                            let r2 = xz2.length();
+                            let inner2 = 1.15 * r_s;
+                            let base_outer2 = 140.0 * r_s * Self::load_f32(&self.disk_outer_scale);
+                            let outer2 = base_outer2.min(600.0 * r_s).max(20.0 * r_s);
+                            if r2 > inner2 && r2 < outer2 {
+                                let rn2 = (r2 - inner2) / (outer2 - inner2);
+                                let bb_inner = blackbody_rgb(12000.0);
+                                let bb_outer = blackbody_rgb(4000.0);
+                                let bb = bb_outer.lerp(bb_inner, (1.0 - rn2).powf(0.6));
+                                let lens_scale = (1.0 - (closest / (4.0 * r_s))).clamp(0.0, 1.0);
+                                disk_secondary += bb * 0.015 * lens_scale;
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // Photon ring heuristic (only if ray misses horizon) broadened for visibility
+        // Photon ring heuristic (only if ray misses horizon) with intensified brightness
         let to_center = -o;
         let proj = to_center.dot(d);
         let closest = if proj > 0.0 {
@@ -334,11 +464,25 @@ impl RayTracer {
         let mut ring = 0.0;
         if closest > photon_sphere * 0.93 && closest < photon_sphere * 1.08 && hit_t.is_infinite() {
             let dist = (closest - photon_sphere).abs() / (0.08 * photon_sphere);
-            ring = (1.0 - dist).clamp(0.0, 1.0).powf(1.3);
+            // Slightly softer photon ring exponent (was 1.3) for less harsh edge
+            ring = (1.0 - dist).clamp(0.0, 1.0).powf(1.15);
         }
 
         // Combine components
-        let mut col = sky + disk_col + Vec3::new(2.6, 2.3, 1.7) * ring * 0.32;
+        // Lensing brightness warp: amplify background & disk near photon sphere
+        let lens_boost = if ring > 0.0 { 1.0 + ring * 1.3 } else { 1.0 };
+        // Soft corona glow enveloping photon ring, fades with distance from photon sphere
+        let corona = if ring > 0.0 {
+            let fall = ((closest / photon_sphere) - 1.0).abs() / 0.12;
+            let g = (1.0 - fall).clamp(0.0, 1.0).powf(1.2);
+            Vec3::new(2.4, 2.1, 1.5) * g * 0.15
+        } else {
+            Vec3::ZERO
+        };
+        let mut col = sky * lens_boost
+            + (disk_col + disk_secondary)
+            + corona
+            + Vec3::new(2.6, 2.3, 1.7) * ring * 0.30; // slightly reduced direct ring intensity
         if hit_t.is_finite() {
             col = Vec3::splat(ring * 0.02);
         }
@@ -511,6 +655,31 @@ fn blackbody_approx(t: f32) -> Vec3 {
     let g = (x * x + 0.3).min(2.0);
     let b = (0.5 + 0.9 * (1.0 - (x / 3.0))).max(0.1);
     Vec3::new(r, g, b) * 0.4
+}
+
+// Approximate blackbody to linear RGB (very rough, normalized)
+fn blackbody_rgb(temp_k: f32) -> Vec3 {
+    // Use simplified Planck curve approximations (empirical)
+    let t = (temp_k / 6500.0).clamp(0.1, 2.0);
+    // Red
+    let r = if t <= 1.0 {
+        1.0
+    } else {
+        (1.0 - 0.3 * (t - 1.0)).clamp(0.0, 1.0)
+    };
+    // Green
+    let g = if t < 1.0 {
+        t.powf(0.8).clamp(0.0, 1.0)
+    } else {
+        (1.0 - 0.15 * (t - 1.0)).clamp(0.0, 1.0)
+    };
+    // Blue
+    let b = if t < 0.65 {
+        0.0
+    } else {
+        ((t - 0.65) / 0.35).clamp(0.0, 1.0).powf(0.9)
+    };
+    Vec3::new(r, g, b) * 1.4
 }
 
 #[inline]
