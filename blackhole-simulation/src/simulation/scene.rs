@@ -1,11 +1,11 @@
 use crate::physics::black_hole::BlackHole;
 use crate::rendering::camera::{Camera, CameraController, CameraMode};
+use crate::rendering::ray_tracer::SamplePattern;
 use crate::simulation::objects::{BlackHoleObject, SimObject};
 use crate::simulation::{InputState, TimeState};
-use crate::rendering::ray_tracer::SamplePattern;
 use glam::Vec3;
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::sync::Arc;
 use winit::event::{DeviceEvent, KeyEvent, MouseScrollDelta, WindowEvent};
 
 pub struct Scene {
@@ -27,7 +27,7 @@ pub struct Scene {
 impl Scene {
     pub fn new() -> Self {
         let bh = Arc::new(BlackHole::new_schwarzschild(10.0).expect("valid BH"));
-    let camera = Arc::new(RwLock::new(Camera::new(
+        let camera = Arc::new(RwLock::new(Camera::new(
             Vec3::new(0.0, 2.0, 10.0),
             Vec3::ZERO,
             16.0 / 9.0,
@@ -55,7 +55,9 @@ impl Scene {
     }
 
     pub fn update(&mut self) {
-    if !self.paused { self.time.update(); }
+        if !self.paused {
+            self.time.update();
+        }
         // Update camera
         // For now create a mutable reference clone of Arc (temporarily clone underlying). This will change when refactoring to interior mutability if needed.
         {
@@ -69,7 +71,7 @@ impl Scene {
                 cam.set_orientation_from_yaw_pitch(self.controller.yaw, self.controller.pitch);
             }
         }
-    if let Some(fps) = self.time.fps_sample() {
+        if let Some(fps) = self.time.fps_sample() {
             log::info!("FPS: {:.1}", fps);
             self.last_fps = Some(fps);
         }
@@ -86,22 +88,42 @@ impl Scene {
             if let PhysicalKey::Code(code) = event.physical_key {
                 if event.state == winit::event::ElementState::Pressed {
                     match code {
-                        KeyCode::KeyH => { self.show_hud = !self.show_hud; }
-                        KeyCode::KeyG => { self.show_center_geodesic = !self.show_center_geodesic; }
-                        KeyCode::KeyP => { self.paused = !self.paused; }
-                        KeyCode::KeyJ => { self.jitter = !self.jitter; }
-                        KeyCode::KeyB => { // cycle sample pattern
+                        KeyCode::KeyH => {
+                            self.show_hud = !self.show_hud;
+                        }
+                        KeyCode::KeyG => {
+                            self.show_center_geodesic = !self.show_center_geodesic;
+                        }
+                        KeyCode::KeyP => {
+                            self.paused = !self.paused;
+                        }
+                        KeyCode::KeyJ => {
+                            self.jitter = !self.jitter;
+                        }
+                        KeyCode::KeyB => {
+                            // cycle sample pattern
                             self.sample_pattern = match self.sample_pattern {
                                 SamplePattern::Halton => SamplePattern::BlueNoise,
                                 SamplePattern::BlueNoise => SamplePattern::HaltonBlueCombine,
                                 SamplePattern::HaltonBlueCombine => SamplePattern::Halton,
                             };
                         }
-                        KeyCode::KeyR => { // recenter camera to look at origin
+                        KeyCode::KeyR => {
+                            // recenter camera to a hardcoded HUD-like position and look at origin
                             let mut cam = self.camera.write();
-                            cam.position = glam::Vec3::new(0.0, 2.0, 10.0);
-                            self.controller.yaw = 0.0; self.controller.pitch = 0.0;
-                            cam.set_orientation_from_yaw_pitch(0.0, 0.0);
+                            let target = glam::Vec3::ZERO;
+                            let pos = glam::Vec3::new(0.5, 1.0, 0.02); // Example HUD position
+                            let up = glam::Vec3::Y;
+                            cam.position = pos;
+                            let dir = (target - cam.position).normalize();
+                            let right = dir.cross(up).normalize();
+                            let up_vec = right.cross(dir).normalize();
+                            cam.forward = dir;
+                            cam.right = right;
+                            cam.up = up_vec;
+                            self.controller.yaw = 0.0;
+                            self.controller.pitch = 0.0;
+                            cam.mark_changed();
                         }
                         _ => {}
                     }
@@ -110,7 +132,7 @@ impl Scene {
             self.handle_keyboard(event);
         } else if let WindowEvent::MouseWheel { delta, .. } = event {
             if let MouseScrollDelta::LineDelta(_, y) = delta {
-                self.controller.speed = (self.controller.speed + y).clamp(1.0, 200.0);
+                self.controller.speed = (self.controller.speed + y).clamp(0.1, 20.0);
             }
         }
     }
@@ -125,18 +147,33 @@ impl Scene {
     pub fn hud_text(&self) -> String {
         let cam = self.camera.read();
         let fps = self.last_fps.unwrap_or(0.0);
-        if !self.show_hud { return String::new(); }
-        let pattern = match self.sample_pattern { SamplePattern::Halton => "Halton", SamplePattern::BlueNoise => "Blue", SamplePattern::HaltonBlueCombine => "Hybrid" };
-        format!("FPS: {:.1}{}\nSamples: {}  Jitter: {}  Pattern[B]: {}\nPos: ({:.1}, {:.1}, {:.1})\nDir: ({:.2}, {:.2}, {:.2})\nSpeed: {:.1}\n[G] Center Geod: {}  [H] HUD  [P] Pause: {}  [J] Jitter",
+        if !self.show_hud {
+            return String::new();
+        }
+        let pattern = match self.sample_pattern {
+            SamplePattern::Halton => "Halton",
+            SamplePattern::BlueNoise => "Blue",
+            SamplePattern::HaltonBlueCombine => "Hybrid",
+        };
+        format!(
+            "FPS: {:.1}{}\nSamples: {}  Jitter: {}  Pattern[B]: {}\nPos: ({:.1}, {:.1}, {:.1})\nDir: ({:.2}, {:.2}, {:.2})\nSpeed: {:.1}\n[G] Center Geod: {}  [H] HUD  [P] Pause: {}  [J] Jitter",
             fps,
             if self.paused { " (PAUSED)" } else { "" },
             self.samples,
             if self.jitter { "ON" } else { "OFF" },
             pattern,
-            cam.position.x, cam.position.y, cam.position.z,
-            cam.forward.x, cam.forward.y, cam.forward.z,
+            cam.position.x,
+            cam.position.y,
+            cam.position.z,
+            cam.forward.x,
+            cam.forward.y,
+            cam.forward.z,
             self.controller.speed,
-            if self.show_center_geodesic { "ON" } else { "OFF" },
+            if self.show_center_geodesic {
+                "ON"
+            } else {
+                "OFF"
+            },
             if self.paused { "ON" } else { "OFF" }
         )
     }

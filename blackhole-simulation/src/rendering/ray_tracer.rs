@@ -228,10 +228,10 @@ impl RayTracer {
 
     fn trace_ray_approx(&self, origin: Vec3, dir: Vec3) -> [f32; 3] {
         let t = 0.5 * (dir.y + 1.0);
-        let mut sky = Vec3::new(0.12, 0.18, 0.35).lerp(Vec3::new(0.95, 0.97, 1.02), t);
+        let mut sky = Vec3::new(0.10, 0.13, 0.22).lerp(Vec3::new(1.1, 1.05, 1.2), t);
         let focus = dir.normalize().dot((-origin).normalize()).clamp(-1.0, 1.0);
         let lens_factor = focus.max(0.0).powf(5.0);
-        sky *= 1.0 - 0.75 * lens_factor;
+        sky *= 1.0 - 0.7 * lens_factor;
         const BH_VISUAL_SCALE: f32 = 3.5e-5;
         let r_s = (self.black_hole.schwarzschild_radius() as f32) * BH_VISUAL_SCALE;
         let photon_sphere = (self.black_hole.photon_sphere_radius() as f32) * BH_VISUAL_SCALE;
@@ -259,10 +259,11 @@ impl RayTracer {
                 let p = origin + dir * t_plane;
                 let r = (p.x * p.x + p.z * p.z).sqrt();
                 if r > 1.05 * r_s && r < 30.0 * r_s {
-                    let emiss = (1.0 / (r / r_s).powf(3.0)).min(5.0);
-                    let temp = (1.0 / (r / (3.0 * r_s)).max(0.2)).min(2.5);
-                    let bb = Vec3::new(1.4 * temp, 1.1 * temp.powf(0.9), temp.powf(0.6));
-                    disk_col = bb * emiss * 0.05 * (0.3 + 0.7 * dir.y.abs());
+                    // Stronger emission and color for visual impact
+                    let emiss = (1.0 / (r / r_s).powf(2.2)).min(10.0);
+                    let temp = (1.5 / (r / (2.5 * r_s)).max(0.15)).min(3.5);
+                    let bb = Vec3::new(2.5 * temp, 1.7 * temp.powf(0.9), 1.2 * temp.powf(0.6));
+                    disk_col = bb * emiss * 0.12 * (0.4 + 0.6 * dir.y.abs());
                 }
             }
         }

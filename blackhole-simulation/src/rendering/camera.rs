@@ -124,7 +124,7 @@ impl CameraController {
             orbit_target,
             yaw: 0.0,
             pitch: 0.0,
-            speed: 10.0,
+            speed: 2.0,
             sensitivity: 0.002,
         }
     }
