@@ -15,6 +15,8 @@ pub struct Mandelbrot {
     pub iteration_step: u32,
     epoch: u64,
     gradient: Vec<[u8; 3]>,
+    pub color_enabled: bool,
+    pub tile_opt: bool,
 }
 
 impl Mandelbrot {
@@ -29,6 +31,8 @@ impl Mandelbrot {
             iteration_step: 8,
             epoch: 0,
             gradient: Vec::new(),
+            color_enabled: true,
+            tile_opt: true,
         }
     }
 
@@ -45,7 +49,9 @@ impl Mandelbrot {
         let clamped = target.clamp(64, 8000);
         if clamped != self.max_iterations {
             self.max_iterations = clamped;
-            self.ensure_gradient();
+            if self.color_enabled {
+                self.ensure_gradient();
+            }
         }
     }
 
@@ -56,6 +62,19 @@ impl Mandelbrot {
                 .map(|i| palette_color(i as f32 / (needed - 1) as f32))
                 .collect();
         }
+    }
+
+    pub fn toggle_color(&mut self) {
+        self.color_enabled = !self.color_enabled;
+        if self.color_enabled {
+            self.ensure_gradient();
+        }
+        self.epoch += 1;
+    }
+
+    pub fn toggle_tile(&mut self) {
+        self.tile_opt = !self.tile_opt;
+        self.epoch += 1;
     }
 
     pub fn zoom(&mut self, factor: f64) {
@@ -89,6 +108,12 @@ impl Mandelbrot {
         let dy = (2.0 * half_h) / h_f;
         let max_iter = self.current_iterations;
 
+        // If final full-res pass and tile optimization enabled, attempt tile renderer.
+        if stride == 1 && self.tile_opt {
+            self.render_tiles(frame, width, height, min_x, min_y, dx, dy, max_iter, scale);
+            return;
+        }
+
         // Parallelize only for stride == 1 to avoid overhead dominating sparse passes.
         if stride == 1 {
             frame
@@ -101,7 +126,11 @@ impl Mandelbrot {
                     for x in 0..width {
                         let (iter, zx, zy) = mandelbrot_point_hybrid(cx, cy, max_iter, scale);
                         let idx = (x * 4) as usize;
-                        let (r, g, b) = color_from_iter(iter, max_iter, zx, zy, &self.gradient);
+                        let (r, g, b) = if self.color_enabled {
+                            color_from_iter(iter, max_iter, zx, zy, &self.gradient)
+                        } else {
+                            mono_from_iter(iter, max_iter)
+                        };
                         row[idx] = r;
                         row[idx + 1] = g;
                         row[idx + 2] = b;
@@ -120,7 +149,11 @@ impl Mandelbrot {
                     let (iter, zx, zy) =
                         mandelbrot_point_hybrid(cx + x as f32 * dx, cy, max_iter, scale);
                     let idx = ((y * width + x) * 4) as usize;
-                    let (r, g, b) = color_from_iter(iter, max_iter, zx, zy, &self.gradient);
+                    let (r, g, b) = if self.color_enabled {
+                        color_from_iter(iter, max_iter, zx, zy, &self.gradient)
+                    } else {
+                        mono_from_iter(iter, max_iter)
+                    };
                     frame[idx] = r;
                     frame[idx + 1] = g;
                     frame[idx + 2] = b;
@@ -128,6 +161,109 @@ impl Mandelbrot {
                     x += stride;
                 }
                 y += stride;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn render_tiles(
+        &self,
+        frame: &mut [u8],
+        width: u32,
+        height: u32,
+        min_x: f32,
+        min_y: f32,
+        dx: f32,
+        dy: f32,
+        max_iter: u32,
+        scale: f32,
+    ) {
+        const TILE: u32 = 8; // tile size
+        let w = width;
+        let h = height;
+        let color_enabled = self.color_enabled;
+        for ty in (0..h).step_by(TILE as usize) {
+            for tx in (0..w).step_by(TILE as usize) {
+                let tw = (TILE).min(w - tx);
+                let th = (TILE).min(h - ty);
+                // sample corners + center
+                let mut samples: [(u32, f32, f32); 5] = [(0, 0.0, 0.0); 5];
+                let coords = [
+                    (tx, ty),
+                    (tx + tw - 1, ty),
+                    (tx, ty + th - 1),
+                    (tx + tw - 1, ty + th - 1),
+                    (tx + tw / 2, ty + th / 2),
+                ];
+                let mut min_it = max_iter;
+                let mut max_it_s = 0u32;
+                for (i, (px, py)) in coords.iter().enumerate() {
+                    let cx = min_x + *px as f32 * dx;
+                    let cy = min_y + *py as f32 * dy;
+                    let s = mandelbrot_point_hybrid(cx, cy, max_iter, scale);
+                    samples[i] = s;
+                    if s.0 < min_it {
+                        min_it = s.0;
+                    }
+                    if s.0 > max_it_s {
+                        max_it_s = s.0;
+                    }
+                }
+                // If all inside set -> fill tile (black in color mode, black in mono)
+                if min_it >= max_iter {
+                    for py in 0..th {
+                        for px in 0..tw {
+                            let idx = (((ty + py) * w + (tx + px)) * 4) as usize;
+                            frame[idx] = 0;
+                            frame[idx + 1] = 0;
+                            frame[idx + 2] = 0;
+                            frame[idx + 3] = 0xFF;
+                        }
+                    }
+                    continue;
+                }
+                // If variance small -> flat fill
+                if max_it_s - min_it <= 2 {
+                    let (r, g, b) = if color_enabled {
+                        color_from_iter(
+                            samples[0].0,
+                            max_iter,
+                            samples[0].1,
+                            samples[0].2,
+                            &self.gradient,
+                        )
+                    } else {
+                        mono_from_iter(samples[0].0, max_iter)
+                    };
+                    for py in 0..th {
+                        for px in 0..tw {
+                            let idx = (((ty + py) * w + (tx + px)) * 4) as usize;
+                            frame[idx] = r;
+                            frame[idx + 1] = g;
+                            frame[idx + 2] = b;
+                            frame[idx + 3] = 0xFF;
+                        }
+                    }
+                    continue;
+                }
+                // Else per-pixel fallback
+                for py in 0..th {
+                    let cy = min_y + (ty + py) as f32 * dy;
+                    for px in 0..tw {
+                        let cx = min_x + (tx + px) as f32 * dx;
+                        let (iter, zx, zy) = mandelbrot_point_hybrid(cx, cy, max_iter, scale);
+                        let (r, g, b) = if color_enabled {
+                            color_from_iter(iter, max_iter, zx, zy, &self.gradient)
+                        } else {
+                            mono_from_iter(iter, max_iter)
+                        };
+                        let idx = (((ty + py) * w + (tx + px)) * 4) as usize;
+                        frame[idx] = r;
+                        frame[idx + 1] = g;
+                        frame[idx + 2] = b;
+                        frame[idx + 3] = 0xFF;
+                    }
+                }
             }
         }
     }
@@ -148,7 +284,9 @@ impl Fractal for Mandelbrot {
             let dynamic_step = self.iteration_step.min(remaining.max(1)).max(2);
             self.current_iterations =
                 (self.current_iterations + dynamic_step).min(self.max_iterations);
-            self.ensure_gradient();
+            if self.color_enabled {
+                self.ensure_gradient();
+            }
         }
         if self.current_iterations != before {
             self.epoch += 1;
@@ -224,19 +362,6 @@ fn mandelbrot_point_hybrid(cx: f32, cy: f32, max_iter: u32, scale: f32) -> (u32,
     mandelbrot_point_f(cx, cy, max_iter)
 }
 
-// Smooth coloring based on normalized iteration count.
-fn smooth_color(iter: u32, max_iter: u32, zx: f64, zy: f64) -> (u8, u8, u8) {
-    if iter >= max_iter {
-        return (0, 0, 0);
-    }
-    let modulus = (zx * zx + zy * zy).sqrt();
-    let nu = (modulus.ln().ln() / std::f64::consts::LN_2).max(0.0);
-    let smooth_iter = iter as f64 + 1.0 - nu;
-    let t = smooth_iter / max_iter as f64; // 0..1
-                                           // Map t through a simple palette (HSV rainbow)
-    hsv_to_rgb(360.0 * t, 1.0, (t * 3.0).min(1.0))
-}
-
 #[inline(always)]
 fn smooth_color_f(iter: u32, max_iter: u32, zx: f32, zy: f32) -> f32 {
     if iter >= max_iter {
@@ -245,28 +370,6 @@ fn smooth_color_f(iter: u32, max_iter: u32, zx: f32, zy: f32) -> f32 {
     let modulus = (zx * zx + zy * zy).sqrt().max(1e-9);
     let nu = (modulus.ln()).ln() / std::f32::consts::LN_2;
     (iter as f32 + 1.0 - nu) / max_iter as f32
-}
-
-fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
-    let c = v * s;
-    let h_prime = (h / 60.0) % 6.0;
-    let x = c * (1.0 - ((h_prime % 2.0) - 1.0).abs());
-    let (r1, g1, b1) = if (0.0..1.0).contains(&h_prime) {
-        (c, x, 0.0)
-    } else if (1.0..2.0).contains(&h_prime) {
-        (x, c, 0.0)
-    } else if (2.0..3.0).contains(&h_prime) {
-        (0.0, c, x)
-    } else if (3.0..4.0).contains(&h_prime) {
-        (0.0, x, c)
-    } else if (4.0..5.0).contains(&h_prime) {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
-    };
-    let m = v - c;
-    let (r, g, b) = (r1 + m, g1 + m, b1 + m);
-    ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
 #[inline(always)]
@@ -314,4 +417,13 @@ fn color_from_iter(
     let idx = (t * (gradient.len() - 1) as f32) as usize;
     let c = gradient[idx];
     (c[0], c[1], c[2])
+}
+
+#[inline(always)]
+fn mono_from_iter(iter: u32, max_iter: u32) -> (u8, u8, u8) {
+    if iter >= max_iter {
+        return (0, 0, 0);
+    }
+    let v = ((iter as u64 * 255) / max_iter as u64) as u8; // simple grayscale
+    (v, v, v)
 }

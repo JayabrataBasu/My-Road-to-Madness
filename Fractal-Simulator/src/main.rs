@@ -117,6 +117,8 @@ struct InputState {
     zoom_out: bool,
     switch_next: bool,
     show_help: bool,
+    toggle_color: bool,
+    toggle_tile: bool,
 }
 
 fn handle_keyboard_input(
@@ -145,6 +147,16 @@ fn handle_keyboard_input(
             VirtualKeyCode::Tab => {
                 if pressed {
                     input_state.switch_next = true;
+                }
+            }
+            VirtualKeyCode::C => {
+                if pressed {
+                    input_state.toggle_color = true;
+                }
+            }
+            VirtualKeyCode::T => {
+                if pressed {
+                    input_state.toggle_tile = true;
                 }
             }
             VirtualKeyCode::H => {
@@ -199,6 +211,20 @@ fn apply_input(
         };
         *need_clear = true;
         input.switch_next = false;
+    }
+    if input.toggle_color {
+        if let FractalKind::Mandelbrot(m) = fractal {
+            m.toggle_color();
+            *need_clear = true;
+        }
+        input.toggle_color = false;
+    }
+    if input.toggle_tile {
+        if let FractalKind::Mandelbrot(m) = fractal {
+            m.toggle_tile();
+            *need_clear = true;
+        }
+        input.toggle_tile = false;
     }
 }
 
