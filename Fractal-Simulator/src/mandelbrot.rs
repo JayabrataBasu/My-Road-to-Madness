@@ -53,7 +53,7 @@ pub struct Mandelbrot {
     // background tile cache and request channel
     tile_cache: Arc<Mutex<HashMap<(u32, u32, u32), Vec<u8>>>>,
     pending_requests: Arc<Mutex<HashSet<(u32, u32, u32)>>>,
-    request_tx: Option<mpsc::Sender<TileRequest>>,
+    request_tx: Arc<Mutex<Option<mpsc::Sender<TileRequest>>>>,
 }
 
 impl Mandelbrot {
@@ -67,7 +67,8 @@ impl Mandelbrot {
             current_iterations: 32,
             iteration_step: 8,
             epoch: 0,
-            gradient: Vec::new(),
+            // small initial gradient to reduce startup hitch; full gradient created on demand
+            gradient: (0..64).map(|i| palette_color(i as f32 / 63.0)).collect(),
             color_enabled: true,
             tile_opt: true,
             prev_iteration_step: None,
@@ -82,18 +83,21 @@ impl Mandelbrot {
             anim_duration: 0.0,
             tile_cache: Arc::new(Mutex::new(HashMap::new())),
             pending_requests: Arc::new(Mutex::new(HashSet::new())),
-            request_tx: None,
+            request_tx: Arc::new(Mutex::new(None)),
         };
+        // spawn worker now to avoid first-request latency
         m.spawn_worker();
         m
     }
 
-    fn spawn_worker(&mut self) {
-        if self.request_tx.is_some() {
+    fn spawn_worker(&self) {
+        let mut guard = self.request_tx.lock().unwrap();
+        if guard.is_some() {
             return;
         }
         let (tx, rx) = mpsc::channel::<TileRequest>();
-        self.request_tx = Some(tx.clone());
+        *guard = Some(tx.clone());
+        drop(guard);
         let cache = Arc::clone(&self.tile_cache);
         let pending = Arc::clone(&self.pending_requests);
         thread::spawn(move || {
@@ -151,7 +155,11 @@ impl Mandelbrot {
             }
             p.insert(key);
         }
-        if let Some(tx) = &self.request_tx {
+        // ensure worker is running
+        self.spawn_worker();
+        // send request via locked sender
+        let guard = self.request_tx.lock().unwrap();
+        if let Some(tx) = &*guard {
             let req = TileRequest {
                 tile_x,
                 tile_y,
@@ -434,6 +442,27 @@ impl Mandelbrot {
             for tx in (0..w).step_by(TILE as usize) {
                 let tw = (TILE).min(w - tx);
                 let th = (TILE).min(h - ty);
+                // tile indices
+                let tile_x = tx / TILE;
+                let tile_y = ty / TILE;
+                // check cache first: if present, blit and continue
+                let key = (tile_x, tile_y, max_iter);
+                if let Ok(cache_guard) = self.tile_cache.lock() {
+                    if let Some(buf) = cache_guard.get(&key) {
+                        // copy cached tile into frame
+                        for py in 0..th {
+                            for px in 0..tw {
+                                let dst_idx = (((ty + py) * w + (tx + px)) * 4) as usize;
+                                let src_idx = ((py * tw + px) * 4) as usize;
+                                frame[dst_idx] = buf[src_idx];
+                                frame[dst_idx + 1] = buf[src_idx + 1];
+                                frame[dst_idx + 2] = buf[src_idx + 2];
+                                frame[dst_idx + 3] = buf[src_idx + 3];
+                            }
+                        }
+                        continue;
+                    }
+                }
                 // sample corners + center
                 let mut samples: [(u32, f32, f32); 5] = [(0, 0.0, 0.0); 5];
                 let coords = [
@@ -512,6 +541,22 @@ impl Mandelbrot {
                         frame[idx + 3] = 0xFF;
                     }
                 }
+                // enqueue background tile computation for this tile (if not already pending)
+                // clone gradient for the worker request; enqueue function will deduplicate via pending_requests
+                self.enqueue_tile_request(
+                    tile_x,
+                    tile_y,
+                    tw,
+                    th,
+                    min_x,
+                    min_y,
+                    dx,
+                    dy,
+                    max_iter,
+                    scale,
+                    color_enabled,
+                    self.gradient.clone(),
+                );
             }
         }
     }
