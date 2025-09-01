@@ -38,6 +38,9 @@ fn main() -> Result<(), Error> {
     let mut need_clear = true;
     let mut last_redraw_instant = Instant::now();
     let mut final_pass_complete = false;
+    let mut last_input_instant = Instant::now();
+    let mut mouse_pos: (u32, u32) = (width / 2, height / 2);
+    let fast_zoom_timeout = Duration::from_millis(600);
 
     let mut input_state = InputState::default();
 
@@ -45,6 +48,27 @@ fn main() -> Result<(), Error> {
         *control_flow = ControlFlow::Poll; // continuous rendering
         match event {
             Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CursorMoved { position, .. } => {
+                    mouse_pos = (position.x as u32, position.y as u32);
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    // apply fast zoom at cursor
+                    if let FractalKind::Mandelbrot(m) = &mut fractal {
+                        m.fast_zoom_start();
+                        let factor = match delta {
+                            winit::event::MouseScrollDelta::LineDelta(_, y) => if y > 0.0 { 0.9 } else { 1.1 },
+                            winit::event::MouseScrollDelta::PixelDelta(p) => if p.y > 0.0 { 0.9 } else { 1.1 },
+                        };
+                        m.zoom_at(factor, mouse_pos.0.min(width-1), mouse_pos.1.min(height-1), width, height);
+                        last_input_instant = Instant::now();
+                        need_clear = true;
+                        // schedule end of fast zoom in main loop when timeout reached
+                    } else {
+                        // non-mandelbrot: fallback to center zoom
+                        fractal.zoom(if matches!(delta, winit::event::MouseScrollDelta::LineDelta(_, y) if y>0.0) { 0.9 } else { 1.1 });
+                        need_clear = true;
+                    }
+                }
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
                 WindowEvent::KeyboardInput { input, .. } => {
                     handle_keyboard_input(input, &mut input_state, control_flow);
@@ -75,6 +99,13 @@ fn main() -> Result<(), Error> {
                 // Update simulation state
                 apply_input(&mut fractal, &mut input_state, width, height, &mut need_clear);
                 fractal.update(0.016); // assume ~60fps
+                // End fast-zoom mode if timeout elapsed
+                if let FractalKind::Mandelbrot(m) = &mut fractal {
+                    if m.is_in_fast_mode() && last_input_instant.elapsed() > fast_zoom_timeout {
+                        m.end_fast_zoom();
+                        need_clear = true;
+                    }
+                }
                 if fractal.detail_epoch() != last_epoch { pass = 0; need_clear = true; final_pass_complete = false; last_epoch = fractal.detail_epoch(); }
                 // Only request redraw if we still refining or something changed recently or periodic heartbeat
                 if !final_pass_complete || need_clear || input_state.show_help || last_redraw_instant.elapsed() > Duration::from_millis(1500) {

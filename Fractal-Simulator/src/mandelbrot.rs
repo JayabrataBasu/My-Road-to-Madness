@@ -17,6 +17,7 @@ pub struct Mandelbrot {
     gradient: Vec<[u8; 3]>,
     pub color_enabled: bool,
     pub tile_opt: bool,
+    prev_iteration_step: Option<u32>,
 }
 
 impl Mandelbrot {
@@ -33,7 +34,61 @@ impl Mandelbrot {
             gradient: Vec::new(),
             color_enabled: true,
             tile_opt: true,
+            prev_iteration_step: None,
         }
+    }
+
+    pub fn pixel_to_complex(&self, px: u32, py: u32, width: u32, height: u32) -> (f64, f64) {
+        let w_f = width as f64;
+        let h_f = height as f64;
+        let scale = self.scale;
+        let half_h = scale * 0.5;
+        let half_w = half_h * (w_f / h_f);
+        let min_x = self.center_x - half_w;
+        let min_y = self.center_y - half_h;
+        let dx = (2.0 * half_w) / w_f;
+        let dy = (2.0 * half_h) / h_f;
+        let cx = min_x + px as f64 * dx;
+        let cy = min_y + py as f64 * dy;
+        (cx, cy)
+    }
+
+    /// Zoom keeping the pixel (px,py) fixed in the complex plane.
+    pub fn zoom_at(&mut self, factor: f64, px: u32, py: u32, width: u32, height: u32) {
+        let before = self.pixel_to_complex(px, py, width, height);
+        self.zoom(factor);
+        let after = self.pixel_to_complex(px, py, width, height);
+        // shift center so that the point under cursor remains the same
+        self.center_x += before.0 - after.0;
+        self.center_y += before.1 - after.1;
+        self.epoch += 1;
+    }
+
+    /// Enter fast-zoom interaction mode: lower iterations and increase step to keep UI responsive.
+    pub fn fast_zoom_start(&mut self) {
+        if self.prev_iteration_step.is_none() {
+            self.prev_iteration_step = Some(self.iteration_step);
+            // reduce current iterations for quick renders
+            self.current_iterations = self.base_iterations.min(self.current_iterations);
+            // increase step so iterations ramp faster after interaction
+            self.iteration_step = (self.iteration_step.max(2))
+                .saturating_mul(8)
+                .clamp(2, 1024);
+            self.epoch += 1;
+        }
+    }
+
+    /// End fast zoom and restore iteration stepping behavior.
+    pub fn end_fast_zoom(&mut self) {
+        if let Some(prev) = self.prev_iteration_step.take() {
+            self.iteration_step = prev;
+            self.recompute_max_iterations();
+            self.epoch += 1;
+        }
+    }
+
+    pub fn is_in_fast_mode(&self) -> bool {
+        self.prev_iteration_step.is_some()
     }
 
     pub fn recompute_iteration_step(&mut self) {
@@ -122,8 +177,8 @@ impl Mandelbrot {
                 .for_each(|(y, row)| {
                     let y = y as u32;
                     let cy = min_y + y as f32 * dy;
-                    let mut cx = min_x;
                     for x in 0..width {
+                        let cx = min_x + x as f32 * dx;
                         let (iter, zx, zy) = mandelbrot_point_hybrid(cx, cy, max_iter, scale);
                         let idx = (x * 4) as usize;
                         let (r, g, b) = if self.color_enabled {
@@ -135,7 +190,6 @@ impl Mandelbrot {
                         row[idx + 1] = g;
                         row[idx + 2] = b;
                         row[idx + 3] = 0xFF;
-                        cx += dx;
                     }
                 });
         } else {
@@ -144,10 +198,9 @@ impl Mandelbrot {
             while y < height {
                 let cy = min_y + y as f32 * dy;
                 let mut x = 0u32;
-                let mut cx = min_x;
                 while x < width {
-                    let (iter, zx, zy) =
-                        mandelbrot_point_hybrid(cx + x as f32 * dx, cy, max_iter, scale);
+                    let cx = min_x + x as f32 * dx;
+                    let (iter, zx, zy) = mandelbrot_point_hybrid(cx, cy, max_iter, scale);
                     let idx = ((y * width + x) * 4) as usize;
                     let (r, g, b) = if self.color_enabled {
                         color_from_iter(iter, max_iter, zx, zy, &self.gradient)
