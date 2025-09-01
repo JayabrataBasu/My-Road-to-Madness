@@ -3,6 +3,28 @@
 
 use crate::fractal::Fractal;
 use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+#[cfg(feature = "simd")]
+use wide::f32x4;
+
+struct TileRequest {
+    tile_x: u32,
+    tile_y: u32,
+    tx: u32,
+    ty: u32,
+    tw: u32,
+    th: u32,
+    min_x: f32,
+    min_y: f32,
+    dx: f32,
+    dy: f32,
+    iter: u32,
+    scale: f32,
+    color_enabled: bool,
+    palette: Vec<[u8; 3]>,
+}
 
 pub struct Mandelbrot {
     pub center_x: f64,
@@ -18,11 +40,25 @@ pub struct Mandelbrot {
     pub color_enabled: bool,
     pub tile_opt: bool,
     prev_iteration_step: Option<u32>,
+    // animated zoom state
+    animating: bool,
+    anim_from_cx: f64,
+    anim_from_cy: f64,
+    anim_from_scale: f64,
+    anim_to_cx: f64,
+    anim_to_cy: f64,
+    anim_to_scale: f64,
+    anim_elapsed: f32,
+    anim_duration: f32,
+    // background tile cache and request channel
+    tile_cache: Arc<Mutex<HashMap<(u32, u32, u32), Vec<u8>>>>,
+    pending_requests: Arc<Mutex<HashSet<(u32, u32, u32)>>>,
+    request_tx: Option<mpsc::Sender<TileRequest>>,
 }
 
 impl Mandelbrot {
     pub fn new() -> Self {
-        Self {
+        let mut m = Self {
             center_x: -0.75,
             center_y: 0.0,
             scale: 2.8,
@@ -35,6 +71,104 @@ impl Mandelbrot {
             color_enabled: true,
             tile_opt: true,
             prev_iteration_step: None,
+            animating: false,
+            anim_from_cx: 0.0,
+            anim_from_cy: 0.0,
+            anim_from_scale: 0.0,
+            anim_to_cx: 0.0,
+            anim_to_cy: 0.0,
+            anim_to_scale: 0.0,
+            anim_elapsed: 0.0,
+            anim_duration: 0.0,
+            tile_cache: Arc::new(Mutex::new(HashMap::new())),
+            pending_requests: Arc::new(Mutex::new(HashSet::new())),
+            request_tx: None,
+        };
+        m.spawn_worker();
+        m
+    }
+
+    fn spawn_worker(&mut self) {
+        if self.request_tx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel::<TileRequest>();
+        self.request_tx = Some(tx.clone());
+        let cache = Arc::clone(&self.tile_cache);
+        let pending = Arc::clone(&self.pending_requests);
+        thread::spawn(move || {
+            while let Ok(req) = rx.recv() {
+                // compute tile into buffer
+                let mut buf = vec![0u8; (req.tw * req.th * 4) as usize];
+                for py in 0..req.th {
+                    let cy = req.min_y + (req.ty + py) as f32 * req.dy;
+                    for px in 0..req.tw {
+                        let cx = req.min_x + (req.tx + px) as f32 * req.dx;
+                        let (iter, zx, zy) = mandelbrot_point_hybrid(cx, cy, req.iter, req.scale);
+                        let (r, g, b) = if req.color_enabled {
+                            color_from_iter(iter, req.iter, zx, zy, &req.palette)
+                        } else {
+                            mono_from_iter(iter, req.iter)
+                        };
+                        let idx = ((py * req.tw + px) * 4) as usize;
+                        buf[idx] = r;
+                        buf[idx + 1] = g;
+                        buf[idx + 2] = b;
+                        buf[idx + 3] = 0xFF;
+                    }
+                }
+                let key = (req.tile_x, req.tile_y, req.iter);
+                if let Ok(mut c) = cache.lock() {
+                    c.insert(key, buf);
+                }
+                if let Ok(mut p) = pending.lock() {
+                    p.remove(&key);
+                }
+            }
+        });
+    }
+
+    fn enqueue_tile_request(
+        &self,
+        tile_x: u32,
+        tile_y: u32,
+        tw: u32,
+        th: u32,
+        min_x: f32,
+        min_y: f32,
+        dx: f32,
+        dy: f32,
+        iter: u32,
+        scale: f32,
+        color_enabled: bool,
+        palette: Vec<[u8; 3]>,
+    ) {
+        let key = (tile_x, tile_y, iter);
+        {
+            let mut p = self.pending_requests.lock().unwrap();
+            if p.contains(&key) {
+                return;
+            }
+            p.insert(key);
+        }
+        if let Some(tx) = &self.request_tx {
+            let req = TileRequest {
+                tile_x,
+                tile_y,
+                tx: tile_x * tw,
+                ty: tile_y * th,
+                tw,
+                th,
+                min_x,
+                min_y,
+                dx,
+                dy,
+                iter,
+                scale,
+                color_enabled,
+                palette,
+            };
+            let _ = tx.send(req);
         }
     }
 
@@ -53,16 +187,7 @@ impl Mandelbrot {
         (cx, cy)
     }
 
-    /// Zoom keeping the pixel (px,py) fixed in the complex plane.
-    pub fn zoom_at(&mut self, factor: f64, px: u32, py: u32, width: u32, height: u32) {
-        let before = self.pixel_to_complex(px, py, width, height);
-        self.zoom(factor);
-        let after = self.pixel_to_complex(px, py, width, height);
-        // shift center so that the point under cursor remains the same
-        self.center_x += before.0 - after.0;
-        self.center_y += before.1 - after.1;
-        self.epoch += 1;
-    }
+    // zoom_at removed; animated zoom replaces it
 
     /// Enter fast-zoom interaction mode: lower iterations and increase step to keep UI responsive.
     pub fn fast_zoom_start(&mut self) {
@@ -89,6 +214,41 @@ impl Mandelbrot {
 
     pub fn is_in_fast_mode(&self) -> bool {
         self.prev_iteration_step.is_some()
+    }
+
+    /// Start an animated zoom to keep the point under (px,py) fixed visually.
+    pub fn start_animated_zoom(
+        &mut self,
+        factor: f64,
+        px: u32,
+        py: u32,
+        width: u32,
+        height: u32,
+        duration_ms: u32,
+    ) {
+        let (before_x, before_y) = self.pixel_to_complex(px, py, width, height);
+        let to_scale = (self.scale * factor).clamp(1.0e-12, 10.0);
+        // compute what center would be after scaling so pixel remains same
+        let half_h = to_scale * 0.5;
+        let half_w = half_h * (width as f64 / height as f64);
+        let min_x = self.center_x - half_w;
+        let min_y = self.center_y - half_h;
+        let dx = (2.0 * half_w) / (width as f64);
+        let dy = (2.0 * half_h) / (height as f64);
+        let after_x = min_x + px as f64 * dx;
+        let after_y = min_y + py as f64 * dy;
+        // setup animation from current to target
+        self.animating = true;
+        self.anim_from_cx = self.center_x;
+        self.anim_from_cy = self.center_y;
+        self.anim_from_scale = self.scale;
+        self.anim_to_scale = to_scale;
+        // adjust target center so the point under cursor stays fixed
+        self.anim_to_cx = self.center_x + (before_x - after_x);
+        self.anim_to_cy = self.center_y + (before_y - after_y);
+        self.anim_elapsed = 0.0;
+        self.anim_duration = duration_ms as f32 / 1000.0;
+        self.epoch += 1;
     }
 
     pub fn recompute_iteration_step(&mut self) {
@@ -177,7 +337,41 @@ impl Mandelbrot {
                 .for_each(|(y, row)| {
                     let y = y as u32;
                     let cy = min_y + y as f32 * dy;
-                    for x in 0..width {
+                    let mut x = 0u32;
+                    #[cfg(feature = "simd")]
+                    {
+                        while x + 4 <= width {
+                            let xs = f32x4::from([
+                                min_x + x as f32 * dx,
+                                min_x + (x + 1) as f32 * dx,
+                                min_x + (x + 2) as f32 * dx,
+                                min_x + (x + 3) as f32 * dx,
+                            ]);
+                            let (iters, zxs, zys) = mandelbrot_point_simd(xs, cy, max_iter);
+                            for lane in 0usize..4usize {
+                                let xi = x + lane as u32;
+                                let idx = (xi * 4) as usize;
+                                let (r, g, b) = if self.color_enabled {
+                                    color_from_iter(
+                                        iters[lane],
+                                        max_iter,
+                                        zxs[lane],
+                                        zys[lane],
+                                        &self.gradient,
+                                    )
+                                } else {
+                                    mono_from_iter(iters[lane], max_iter)
+                                };
+                                row[idx] = r;
+                                row[idx + 1] = g;
+                                row[idx + 2] = b;
+                                row[idx + 3] = 0xFF;
+                            }
+                            x += 4;
+                        }
+                    }
+                    // scalar tail
+                    while x < width {
                         let cx = min_x + x as f32 * dx;
                         let (iter, zx, zy) = mandelbrot_point_hybrid(cx, cy, max_iter, scale);
                         let idx = (x * 4) as usize;
@@ -190,6 +384,7 @@ impl Mandelbrot {
                         row[idx + 1] = g;
                         row[idx + 2] = b;
                         row[idx + 3] = 0xFF;
+                        x += 1;
                     }
                 });
         } else {
@@ -331,6 +526,22 @@ impl Fractal for Mandelbrot {
     }
     fn update(&mut self, _dt: f32) {
         let before = self.current_iterations;
+        // advance animation if active
+        if self.animating {
+            // clamp dt to frame budget; use a fixed small step for smoothness
+            let dt = 1.0 / 60.0;
+            self.anim_elapsed += dt;
+            let t = (self.anim_elapsed / self.anim_duration).min(1.0);
+            // smoothstep easing
+            let tt = t * t * (3.0 - 2.0 * t);
+            self.center_x = self.anim_from_cx + (self.anim_to_cx - self.anim_from_cx) * tt as f64;
+            self.center_y = self.anim_from_cy + (self.anim_to_cy - self.anim_from_cy) * tt as f64;
+            self.scale =
+                self.anim_from_scale + (self.anim_to_scale - self.anim_from_scale) * tt as f64;
+            if t >= 1.0 {
+                self.animating = false;
+            }
+        }
         self.recompute_max_iterations();
         if self.current_iterations < self.max_iterations {
             let remaining = self.max_iterations - self.current_iterations;
@@ -403,6 +614,35 @@ fn mandelbrot_point_f(cx: f32, cy: f32, max_iter: u32) -> (u32, f32, f32) {
         iter += 1;
     }
     (iter, zx, zy)
+}
+
+#[cfg(feature = "simd")]
+/// Compute escape iterations for four x coordinates at once (same cy)
+fn mandelbrot_point_simd(xs: f32x4, cy: f32, max_iter: u32) -> ([u32; 4], [f32; 4], [f32; 4]) {
+    let mut zx = f32x4::from(0.0);
+    let mut zy = f32x4::from(0.0);
+    let cx = xs;
+    let mut iter = [0u32; 4];
+    for _ in 0..max_iter {
+        let zx2 = zx * zx - zy * zy + cx;
+        zy = (zx * zy) * f32x4::from(2.0) + f32x4::from(cy);
+        zx = zx2;
+        let mag2 = zx * zx + zy * zy;
+        let mag2_arr = mag2.to_array();
+        let mut any_alive = false;
+        for lane in 0usize..4usize {
+            if mag2_arr[lane] <= 4.0 {
+                iter[lane] += 1;
+                any_alive = true;
+            }
+        }
+        if !any_alive {
+            break;
+        }
+    }
+    let zxs = zx.to_array();
+    let zys = zy.to_array();
+    (iter, zxs, zys)
 }
 
 #[inline(always)]

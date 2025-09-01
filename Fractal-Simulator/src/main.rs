@@ -40,7 +40,9 @@ fn main() -> Result<(), Error> {
     let mut final_pass_complete = false;
     let mut last_input_instant = Instant::now();
     let mut mouse_pos: (u32, u32) = (width / 2, height / 2);
-    let fast_zoom_timeout = Duration::from_millis(600);
+    let mut fast_zoom_timeout = Duration::from_millis(600);
+    let mut wheel_count_recent = 0u32;
+    let mut last_wheel_instant = Instant::now();
 
     let mut input_state = InputState::default();
 
@@ -55,14 +57,25 @@ fn main() -> Result<(), Error> {
                     // apply fast zoom at cursor
                     if let FractalKind::Mandelbrot(m) = &mut fractal {
                         m.fast_zoom_start();
+                        // adaptive timeout: if user is rapidly scrolling, shrink timeout
+                        let now = Instant::now();
+                        if now.duration_since(last_wheel_instant) < Duration::from_millis(200) {
+                            wheel_count_recent = wheel_count_recent.saturating_add(1);
+                        } else {
+                            wheel_count_recent = 1;
+                        }
+                        last_wheel_instant = now;
+                        // shorten timeout when many wheel gestures occur
+                        fast_zoom_timeout = Duration::from_millis((600u64).saturating_sub((wheel_count_recent as u64).saturating_mul(80)));
+
                         let factor = match delta {
                             winit::event::MouseScrollDelta::LineDelta(_, y) => if y > 0.0 { 0.9 } else { 1.1 },
                             winit::event::MouseScrollDelta::PixelDelta(p) => if p.y > 0.0 { 0.9 } else { 1.1 },
                         };
-                        m.zoom_at(factor, mouse_pos.0.min(width-1), mouse_pos.1.min(height-1), width, height);
-                        last_input_instant = Instant::now();
+                        // use a short animated zoom to smooth the motion
+                        m.start_animated_zoom(factor, mouse_pos.0.min(width-1), mouse_pos.1.min(height-1), width, height, 120);
+                        last_input_instant = now;
                         need_clear = true;
-                        // schedule end of fast zoom in main loop when timeout reached
                     } else {
                         // non-mandelbrot: fallback to center zoom
                         fractal.zoom(if matches!(delta, winit::event::MouseScrollDelta::LineDelta(_, y) if y>0.0) { 0.9 } else { 1.1 });
