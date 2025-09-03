@@ -278,20 +278,44 @@ impl RayTracer {
         let photon_sphere = (self.black_hole.photon_sphere_radius() as f32) * BH_VISUAL_SCALE;
         // Now that we have r_s, compute warped background direction (override earlier placeholder)
         let warped_dir = {
-            let b = origin.cross(dir).length(); // since |dir| ~1
+            let b = origin.cross(dir).length();
+            let bh_dir_to_cam = (-origin).normalize();
             let mut alpha = 2.0 * r_s / b.max(1e-6); // weak field deflection
-            // Intensify near photon sphere (b ~ sqrt(27)/2 r_s ~ 2.598 r_s)
-            let b_norm = b / (1.5 * photon_sphere);
-            if b_norm < 1.2 {
-                alpha *= 1.0 + (1.2 - b_norm).max(0.0).powf(2.5) * 4.0;
+
+            // Strong lensing near photon sphere
+            let b_photon = photon_sphere;
+            let b_norm = b / b_photon;
+            if b_norm < 1.3 {
+                // For b very close to photon sphere, allow multiple windings
+                let windings = ((1.3 - b_norm) * 2.0).clamp(0.0, 2.0); // up to 2 windings
+                alpha *= 1.0 + windings * 6.0; // much stronger deflection
             }
-            alpha = alpha.min(0.8);
+            alpha = alpha.min(2.5); // cap max deflection
+
             // Bend direction toward BH center
             let bent = (dir * (1.0 - alpha) + bh_dir_to_cam * alpha).normalize();
             bent
         };
-        // Re-evaluate star contribution with warped_dir (add delta)
-        sky += rich_starfield(warped_dir) * star_b * 0.5; // half strength additive warp detail
+        // Enhanced lensing: color tinting and chromatic aberration for lensed stars
+        let b = origin.cross(dir).length();
+        let b_photon = photon_sphere;
+        let b_norm = b / b_photon;
+        let mut lens_tint = Vec3::ONE;
+        let mut lens_boost = 1.0;
+        if b_norm < 1.15 {
+            // Near Einstein ring: blue-white tint and intensity boost
+            let t = (1.15 - b_norm).clamp(0.0, 1.0);
+            lens_tint = Vec3::new(0.85 + 0.15 * t, 0.92 + 0.08 * t, 1.0);
+            lens_boost = 1.0 + 2.5 * t;
+        }
+        // Chromatic aberration: offset RGB channels for stars near ring
+        let delta = 0.008 * (1.15 - b_norm).clamp(0.0, 1.0);
+        let star_r = rich_starfield(warped_dir + Vec3::new(delta, 0.0, 0.0)).x;
+        let star_g = rich_starfield(warped_dir + Vec3::new(0.0, delta, 0.0)).y;
+        let star_bv = rich_starfield(warped_dir + Vec3::new(0.0, 0.0, delta)).z;
+        let chroma_star =
+            Vec3::new(star_r, star_g, star_bv) * lens_tint * lens_boost * star_b * 0.5;
+        sky += chroma_star;
 
         // Simple sphere test (for horizon silhouette)
         let o = origin;
@@ -493,6 +517,9 @@ impl RayTracer {
             let g_fac = (1.0 - r_s / r_cam.max(r_s + 1e-3)).sqrt().max(0.05);
             col = Vec3::new(col.x, col.y * g_fac, col.z * g_fac * 0.6);
         }
+        // Vignette effect for immersion
+        let vignette = 0.7 + 0.3 * (dir.y).powf(2.0);
+        col *= vignette;
         [col.x.max(0.0), col.y.max(0.0), col.z.max(0.0)]
     }
 
