@@ -258,7 +258,6 @@ impl RayTracer {
         let mut sky = Vec3::new(0.005, 0.006, 0.01).lerp(Vec3::new(0.10, 0.11, 0.12), t);
         // Lensing-warp background direction for sampling stars (very approximate Schwarzschild deflection)
         // Compute impact parameter b ~ |o x d| / |d|
-        let bh_dir_to_cam = (-origin).normalize();
         // Defer r_s fetch until after BH scale constants below if needed
         // Add richer starfield with warp
         let star_b = Self::load_f32(&self.star_brightness);
@@ -435,41 +434,65 @@ impl RayTracer {
                     disk_col += rim_tint * rim_mix * edge;
                 }
             }
-            // Secondary (lensed) disk image approximation: reflect ray if it passes above disk near BH
+            // Secondary & tertiary (faint) lensed disk images (clean refactor)
             if dir.y > 0.0 {
-                let closest = {
-                    let proj = (-origin).dot(dir);
-                    if proj > 0.0 {
-                        (-origin - dir * (proj / dir.length_squared())).length()
-                    } else {
-                        origin.length()
-                    }
+                let proj = (-origin).dot(dir);
+                let closest = if proj > 0.0 {
+                    (-origin - dir * (proj / dir.length_squared())).length()
+                } else {
+                    origin.length()
                 };
                 if closest < 4.0 * r_s {
-                    // near BH
-                    // Mirror ray across mid-plane
-                    let mut d_mirror = dir;
-                    d_mirror.y = -d_mirror.y.abs();
-                    if d_mirror.y.abs() > 1e-6 {
-                        let t_plane2 = -origin.y / d_mirror.y;
-                        if t_plane2 > 0.0 {
-                            let p2 = origin + d_mirror * t_plane2;
+                    let inner2 = 1.15 * r_s;
+                    let base_outer2 = 140.0 * r_s * Self::load_f32(&self.disk_outer_scale);
+                    let outer2 = base_outer2.min(600.0 * r_s).max(20.0 * r_s);
+                    let bb_inner = blackbody_rgb(12000.0);
+                    let bb_outer = blackbody_rgb(4000.0);
+                    let lens_scale = (1.0 - (closest / (4.0 * r_s))).clamp(0.0, 1.0);
+
+                    // First lensed image
+                    let mut d1 = dir;
+                    let s1 = 0.85 + 0.15 * ((4.0 * r_s - closest) / (4.0 * r_s)).clamp(0.0, 1.0);
+                    d1 = (d1 * (1.0 - s1) + (-origin).normalize() * s1).normalize();
+                    d1.y = -d1.y.abs();
+                    if d1.y.abs() > 1e-6 {
+                        let t1 = -origin.y / d1.y;
+                        if t1 > 0.0 {
+                            let p2 = origin + d1 * t1;
                             let mut xz2 = glam::Vec2::new(p2.x, p2.z);
                             xz2 = glam::Vec2::new(
                                 cos_a * xz2.x - sin_a * xz2.y,
                                 sin_a * xz2.x + cos_a * xz2.y,
                             );
                             let r2 = xz2.length();
-                            let inner2 = 1.15 * r_s;
-                            let base_outer2 = 140.0 * r_s * Self::load_f32(&self.disk_outer_scale);
-                            let outer2 = base_outer2.min(600.0 * r_s).max(20.0 * r_s);
                             if r2 > inner2 && r2 < outer2 {
                                 let rn2 = (r2 - inner2) / (outer2 - inner2);
-                                let bb_inner = blackbody_rgb(12000.0);
-                                let bb_outer = blackbody_rgb(4000.0);
-                                let bb = bb_outer.lerp(bb_inner, (1.0 - rn2).powf(0.6));
-                                let lens_scale = (1.0 - (closest / (4.0 * r_s))).clamp(0.0, 1.0);
-                                disk_secondary += bb * 0.015 * lens_scale;
+                                let bb = bb_inner.lerp(bb_outer, rn2.powf(0.7));
+                                disk_secondary += bb * 0.045 * lens_scale;
+                            }
+                        }
+                    }
+
+                    // Tertiary faint image
+                    if closest < 2.5 * r_s {
+                        let mut d2 = dir;
+                        d2 = (d2 * 0.5 + (-origin).normalize() * 0.5).normalize();
+                        d2.y = -d2.y.abs();
+                        if d2.y.abs() > 1e-6 {
+                            let t2 = -origin.y / d2.y;
+                            if t2 > 0.0 {
+                                let p3 = origin + d2 * t2;
+                                let mut xz3 = glam::Vec2::new(p3.x, p3.z);
+                                xz3 = glam::Vec2::new(
+                                    cos_a * xz3.x - sin_a * xz3.y,
+                                    sin_a * xz3.x + cos_a * xz3.y,
+                                );
+                                let r3 = xz3.length();
+                                if r3 > inner2 && r3 < outer2 {
+                                    let rn3 = (r3 - inner2) / (outer2 - inner2);
+                                    let bb3 = bb_inner.lerp(bb_outer, rn3.powf(0.7));
+                                    disk_secondary += bb3 * 0.012 * lens_scale;
+                                }
                             }
                         }
                     }
@@ -478,16 +501,11 @@ impl RayTracer {
         }
 
         // Photon ring heuristic (only if ray misses horizon) with intensified brightness
-        let to_center = -o;
-        let proj = to_center.dot(d);
-        let closest = if proj > 0.0 {
-            (to_center - d * (proj / d.length_squared())).length()
-        } else {
-            o.length()
-        };
         let mut ring = 0.0;
-        if closest > photon_sphere * 0.93 && closest < photon_sphere * 1.08 && hit_t.is_infinite() {
-            let dist = (closest - photon_sphere).abs() / (0.08 * photon_sphere);
+        if hit_t.is_finite() {
+            // Heuristic: stronger ring if closer to photon sphere
+            let dist = (origin.length() - r_s).abs() / r_s;
+            ring = 1.0 - dist.clamp(0.0, 1.0);
             // Slightly softer photon ring exponent (was 1.3) for less harsh edge
             ring = (1.0 - dist).clamp(0.0, 1.0).powf(1.15);
         }
@@ -497,8 +515,10 @@ impl RayTracer {
         let lens_boost = if ring > 0.0 { 1.0 + ring * 1.3 } else { 1.0 };
         // Soft corona glow enveloping photon ring, fades with distance from photon sphere
         let corona = if ring > 0.0 {
-            let fall = ((closest / photon_sphere) - 1.0).abs() / 0.12;
-            let g = (1.0 - fall).clamp(0.0, 1.0).powf(1.2);
+            // Use radial distance as proxy (closest might be out of scope here)
+            let radial = origin.length();
+            let fall = (((radial - photon_sphere).abs()) / (0.12 * photon_sphere)).clamp(0.0, 1.0);
+            let g: f32 = (1.0 - fall).clamp(0.0, 1.0).powf(1.2);
             Vec3::new(2.4, 2.1, 1.5) * g * 0.15
         } else {
             Vec3::ZERO
