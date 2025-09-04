@@ -67,7 +67,7 @@ impl Scene {
         // Handle one-shot star brightness toggle
         if self.input.toggle_star_brightness {
             self.star_brightness = if (self.star_brightness - 1.0).abs() < 0.01 {
-                0.3
+                0.4
             } else {
                 1.0
             };
@@ -137,20 +137,25 @@ impl Scene {
                             };
                         }
                         KeyCode::KeyR => {
-                            // recenter camera to a hardcoded HUD-like position and look at origin
+                            // Recenter: place camera on a circle around origin preserving current yaw/pitch orientation.
+                            // Maintain current distance OR default to 15 * r_s (approx visual scale) if far.
                             let mut cam = self.camera.write();
                             let target = glam::Vec3::ZERO;
-                            let pos = glam::Vec3::new(0.5, 1.0, 0.02); // Example HUD position
-                            let up = glam::Vec3::Y;
-                            cam.position = pos;
-                            let dir = (target - cam.position).normalize();
-                            let right = dir.cross(up).normalize();
-                            let up_vec = right.cross(dir).normalize();
-                            cam.forward = dir;
-                            cam.right = right;
-                            cam.up = up_vec;
-                            self.controller.yaw = 0.0;
-                            self.controller.pitch = 0.0;
+                            let current_forward = cam.forward.normalize();
+                            let desired_dist = (cam.position.length()).clamp(2.0, 200.0);
+                            cam.position = target - current_forward * desired_dist;
+                            // Rebuild orthonormal basis
+                            let up_ref = glam::Vec3::Y;
+                            let right = current_forward.cross(up_ref).normalize_or_zero();
+                            let up_vec = right.cross(current_forward).normalize_or_zero();
+                            if right.length_squared() > 0.0 && up_vec.length_squared() > 0.0 {
+                                cam.right = right;
+                                cam.up = up_vec;
+                                cam.forward = current_forward;
+                            }
+                            // Derive controller yaw/pitch from forward so mouse continues smoothly
+                            self.controller.pitch = current_forward.y.asin();
+                            self.controller.yaw = current_forward.x.atan2(-current_forward.z);
                             cam.mark_changed();
                         }
                         KeyCode::KeyO => {
@@ -191,7 +196,7 @@ impl Scene {
             SamplePattern::HaltonBlueCombine => "Hybrid",
         };
         format!(
-            "FPS: {:.1}{}\nSamples: {}  Jitter: {}  Pattern[B]: {}\nPos: ({:.1}, {:.1}, {:.1})\nDir: ({:.2}, {:.2}, {:.2})\nSpeed: {:.1}  Mode[O]: {:?}  Roll(Q/E): {:.2}\nDisk R[1/2]: {:.2}  Thick[3/4]: {:.2}  Stars[V]: {:.1}\n[G] Center Geod: {}  [H] HUD  [P] Pause: {}  [J] Jitter",
+            "FPS: {:.1}{}\nSamples: {}  Jitter: {}  Pattern[B]: {}\nPos: ({:.1}, {:.1}, {:.1})\nDir: ({:.2}, {:.2}, {:.2})  Up: ({:.2}, {:.2}, {:.2})\nSpeed: {:.1}  Mode[O]: {:?}  Roll(Q/E): {:.2}\nDisk R[1/2]: {:.2}  Thick[3/4]: {:.2}  Stars[V]: {:.1}\n[G] Center Geod: {}  [H] HUD  [P] Pause: {}  [J] Jitter",
             fps,
             if self.paused { " (PAUSED)" } else { "" },
             self.samples,
@@ -203,6 +208,9 @@ impl Scene {
             cam.forward.x,
             cam.forward.y,
             cam.forward.z,
+            cam.up.x,
+            cam.up.y,
+            cam.up.z,
             self.controller.speed,
             self.controller.mode,
             self.controller.roll,

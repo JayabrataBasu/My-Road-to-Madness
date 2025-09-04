@@ -378,24 +378,15 @@ impl RayTracer {
                             continue;
                         }
                         let vertical_density = (-vz * vz * 3.0).exp();
-                        // Emissivity & temperature
-                        let q = 2.1;
+                        // Emissivity with falloff exponent q plus clamp
+                        let q = 2.1; // radial emissivity power
                         let emiss = ((r / (4.5 * r_s)).max(0.35).powf(-q)).min(30.0);
-                        let temp_inner = 1.0;
-                        let temp_mid = 0.6;
-                        let temp_outer = 0.35;
+                        // Continuous temperature profile T(r) ~ T0 (r/r_in)^(-3/4)
                         let rn = (r - inner) / (outer - inner);
-                        // Blend three blackbodies
-                        let bb_inner = blackbody_rgb(12000.0 * temp_inner);
-                        let bb_mid = blackbody_rgb(6500.0 * temp_mid);
-                        let bb_outer = blackbody_rgb(4000.0 * temp_outer);
-                        let bbmix = if rn < 0.3 {
-                            bb_inner.lerp(bb_mid, rn / 0.3)
-                        } else if rn < 0.75 {
-                            bb_mid.lerp(bb_outer, (rn - 0.3) / 0.45)
-                        } else {
-                            bb_outer * (1.0 - (rn - 0.75) * 0.6)
-                        };
+                        let base_temp = 15000.0 * (r / inner).powf(-0.75);
+                        let base_temp = base_temp.clamp(3500.0, 16000.0);
+                        // Will adjust after velocity calc below
+                        let mut disk_color = blackbody_rgb(base_temp);
                         // Add subtle turbulent pattern (azimuthal + radial)
                         let angle = xz.y.atan2(xz.x);
                         let ring_mod = ((r / (4.0 * r_s)).sin() * 0.5 + 0.5).powf(0.7);
@@ -411,11 +402,34 @@ impl RayTracer {
                         let view_dir = -dir.normalize();
                         let cos_th = vel_dir.dot(view_dir).clamp(-1.0, 1.0);
                         let doppler = (gamma * (1.0 - beta * cos_th)).max(0.05);
-                        // Softer Doppler beaming (was -3.0) to avoid star-like hotspot
+                        // Spectral shift approximation: temperature scales weakly with relativistic factor
+                        let temp_shift = doppler.powf(-0.25); // inverse because intensity boost already applied below
+                        let shifted_temp = (base_temp * temp_shift).clamp(3000.0, 17000.0);
+                        disk_color = blackbody_rgb(shifted_temp);
+                        // Radial reddening toward outer disk
+                        let outer_warm = rn.clamp(0.0, 1.0).powf(1.4);
+                        disk_color = disk_color.lerp(
+                            Vec3::new(
+                                disk_color.x * 1.08,
+                                disk_color.y * 0.95,
+                                disk_color.z * 0.72,
+                            ),
+                            outer_warm,
+                        );
+                        // Inner ionized violet accent
+                        if r < inner * 1.6 {
+                            let tvi = 1.0 - ((r - inner) / (inner * 0.6)).clamp(0.0, 1.0);
+                            disk_color += Vec3::new(0.35, 0.18, 0.55) * tvi * 0.35;
+                        }
+                        // Mild desaturation with altitude (layer index) to hint scattering
+                        let layer_t = (li as f32) / (layer_count - 1) as f32;
+                        let gray = Vec3::splat((disk_color.x + disk_color.y + disk_color.z) / 3.0);
+                        disk_color = disk_color.lerp(gray, layer_t * 0.15);
+                        // Softer Doppler beaming exponent for intensity
                         let boost = doppler.powf(-2.2);
                         // Simple optical depth accumulation (front-to-back since single plane)
                         let layer_color =
-                            bbmix * emiss * boost * vertical_density * layer_w * texture_mod;
+                            disk_color * emiss * boost * vertical_density * layer_w * texture_mod;
                         let alpha = (vertical_density * layer_w * 0.25).clamp(0.0, 1.0);
                         accum = accum + layer_color * (1.0 - total_alpha);
                         total_alpha += alpha * (1.0 - total_alpha);
@@ -425,7 +439,8 @@ impl RayTracer {
                     }
                     // Edge fade
                     let edge = ((outer - r) / (outer - inner)).clamp(0.0, 1.0).powf(1.3);
-                    disk_col = accum * edge * 0.02;
+                    // Temporarily boosted base disk visibility (was 0.02)
+                    disk_col = accum * edge * 0.06;
                     // Blend a warm rim tint near the ISCO to visually merge with photon ring
                     let inner_blend = ((r - inner) / (inner * 0.7)).clamp(0.0, 1.0);
                     let rim_mix = 1.0 - inner_blend;
@@ -468,7 +483,8 @@ impl RayTracer {
                             if r2 > inner2 && r2 < outer2 {
                                 let rn2 = (r2 - inner2) / (outer2 - inner2);
                                 let bb = bb_inner.lerp(bb_outer, rn2.powf(0.7));
-                                disk_secondary += bb * 0.045 * lens_scale;
+                                // Slightly brighter secondary image while tuning (was 0.045)
+                                disk_secondary += bb * 0.065 * lens_scale;
                             }
                         }
                     }
@@ -491,7 +507,8 @@ impl RayTracer {
                                 if r3 > inner2 && r3 < outer2 {
                                     let rn3 = (r3 - inner2) / (outer2 - inner2);
                                     let bb3 = bb_inner.lerp(bb_outer, rn3.powf(0.7));
-                                    disk_secondary += bb3 * 0.012 * lens_scale;
+                                    // Slightly brighter tertiary image (was 0.012)
+                                    disk_secondary += bb3 * 0.020 * lens_scale;
                                 }
                             }
                         }
