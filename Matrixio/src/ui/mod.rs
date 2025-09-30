@@ -14,6 +14,7 @@ pub struct MatrixioApp {
 
     // UI state
     selected_matrix: Option<String>,
+    selected_result: Option<String>, // Selected operation result
 
     // Panels and editors
     matrix_editor: matrix_editor::MatrixEditor,
@@ -84,6 +85,7 @@ impl MatrixioApp {
         Self {
             project: Project::new(),
             selected_matrix: None,
+            selected_result: None,
             matrix_editor: matrix_editor::MatrixEditor::new(),
             operations_panel: operations_panel::OperationsPanel::new(),
             operation_results: Vec::new(),
@@ -152,102 +154,99 @@ impl eframe::App for MatrixioApp {
 
         // Main content
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                // Left panel: Matrix list and editor
-                ui.vertical(|ui| {
-                    ui.set_width(300.0);
+            // Add vertical scroll area to prevent overflow
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true]) // Don't shrink horizontally, allow vertical shrinking
+                .max_height(ui.available_height()) // Use full available height
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // Left panel: Matrix list and editor
+                        ui.vertical(|ui| {
+                            ui.set_width(300.0);
 
-                    self.render_matrix_list(ui);
-
-                    ui.separator();
-
-                    self.render_matrix_editor(ui);
-                });
-
-                ui.separator();
-
-                // Right panel: Matrix display and operations
-                ui.vertical(|ui| {
-                    if let Some(selected) = &self.selected_matrix {
-                        let selected_clone = selected.clone();
-                        let has_matrix = self.project.matrices.contains_key(&selected_clone);
-
-                        if has_matrix {
-                            ui.heading(format!("Matrix: {}", selected_clone));
-
-                            // Display matrix content (editable) - split borrowing
-                            ui.separator();
-
-                            // Get matrix info first to avoid borrowing conflicts
-                            let matrix_info =
-                                if let Some(matrix) = self.project.matrices.get(&selected_clone) {
-                                    Some((matrix.dimensions(), matrix.name.clone()))
-                                } else {
-                                    None
-                                };
-
-                            if let Some(((rows, cols), matrix_name)) = matrix_info {
-                                ui.horizontal(|ui| {
-                                    ui.label(format!("Size: {}×{}", rows, cols));
-                                    ui.label(format!("Name: {}", matrix_name));
-
-                                    // Show editing mode indicator
-                                    if rows <= 10 && cols <= 10 {
-                                        ui.label("🖊️ All cells editable");
-                                    } else {
-                                        ui.label("📋 Scroll to edit cells");
-                                    }
-                                });
-                                ui.add_space(10.0);
-
-                                // Render matrix based on size
-                                self.render_editable_matrix(ui, &selected_clone);
-                            }
+                            self.render_matrix_list(ui);
 
                             ui.separator();
-                            ui.label("Operations:");
 
-                            // Get operation result
-                            let operation_result =
-                                self.operations_panel
-                                    .show(ui, &self.project, &selected_clone);
-
-                            if let Some(result) = operation_result {
-                                // Store the result
-                                let result_name =
-                                    format!("Result_{}", self.operation_results.len() + 1);
-                                self.operation_results.push((result_name.clone(), result));
-                                self.success_message =
-                                    Some(format!("Operation completed: {}", result_name));
-                            }
-
-                            // Results section
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.label("Results:");
-                                ui.checkbox(&mut self.show_results, "Show Details");
-                            });
-
-                            if self.show_results {
-                                self.render_operation_results(ui);
-                            } else if !self.operation_results.is_empty() {
-                                ui.label(format!(
-                                    "{} result(s) available",
-                                    self.operation_results.len()
-                                ));
-                            }
-                        } else {
-                            ui.label("Selected matrix no longer exists");
-                            self.selected_matrix = None;
-                        }
-                    } else {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(50.0);
-                            ui.label("Select a matrix to perform operations");
+                            self.render_matrix_editor(ui);
                         });
-                    }
+
+                        ui.separator();
+
+                        // Right panel: Matrix display and operations
+                        ui.vertical(|ui| {
+                            // Check if we have a selected matrix or result
+                            if let Some(selected) = &self.selected_matrix {
+                                let selected_clone = selected.clone();
+                                let has_matrix = self.project.matrices.contains_key(&selected_clone);
+
+                                if has_matrix {
+                                    ui.heading(format!("Matrix: {}", selected_clone));
+
+                                    // Display matrix content (editable) - split borrowing
+                                    ui.separator();
+
+                                    // Get matrix info first to avoid borrowing conflicts
+                                    let matrix_info =
+                                        if let Some(matrix) = self.project.matrices.get(&selected_clone) {
+                                            Some((matrix.dimensions(), matrix.name.clone()))
+                                        } else {
+                                            None
+                                        };
+
+                                    if let Some(((rows, cols), matrix_name)) = matrix_info {
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!("Size: {}×{}", rows, cols));
+                                            ui.label(format!("Name: {}", matrix_name));
+
+                                            // Show editing mode indicator
+                                            if rows <= 10 && cols <= 10 {
+                                                ui.label("🖊️ All cells editable");
+                                            } else {
+                                                ui.label("📋 Scroll to edit cells");
+                                            }
+                                        });
+                                        ui.add_space(10.0);
+
+                                        // Render matrix based on size
+                                        self.render_editable_matrix(ui, &selected_clone);
+                                    }
+
+                                    ui.separator();
+                                    ui.label("Operations:");
+
+                                    // Get operation result
+                                    let operation_result =
+                                        self.operations_panel
+                                            .show(ui, &self.project, &selected_clone);
+
+                                    if let Some(result) = operation_result {
+                                        // Store the result
+                                        let result_name =
+                                            format!("Result_{}", self.operation_results.len() + 1);
+                                        self.operation_results.push((result_name.clone(), result));
+                                        self.success_message =
+                                            Some(format!("Operation completed: {}", result_name));
+                                    }
+
+                                    // Results are now shown in the left panel as cards
+                                } else {
+                                    ui.label("Selected matrix no longer exists");
+                                    self.selected_matrix = None;
+                                }
+                            } else if let Some(selected_result) = &self.selected_result {
+                                // Display selected result
+                                let result_name = selected_result.clone();
+                                self.render_selected_result(ui, &result_name);
+                            } else {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(50.0);
+                                    ui.label("Select a matrix to perform operations or a result to view");
+                                });
+                            }
+                        });
+                    });
                 });
-            });
         });
 
         // Show messages
@@ -331,8 +330,22 @@ impl MatrixioApp {
                     })
                     .collect();
                 
+                // Collect result data to avoid borrowing issues
+                let result_data: Vec<(String, OperationResult)> = self.operation_results.clone();
+                
                 for (name, matrix) in matrix_data {
                     self.render_matrix_card(ui, &name, &matrix);
+                }
+                
+                // Add separator between matrices and results
+                if !self.project.matrices.is_empty() && !self.operation_results.is_empty() {
+                    ui.separator();
+                    ui.add_space(5.0);
+                }
+                
+                // Render result cards
+                for (name, result) in &result_data {
+                    self.render_result_card(ui, name, result);
                 }
             });
         
@@ -408,6 +421,205 @@ impl MatrixioApp {
         }
         
         ui.add_space(4.0);
+    }
+    
+    fn render_result_card(&mut self, ui: &mut egui::Ui, name: &str, result: &OperationResult) {
+        let is_selected = self.selected_result.as_ref().map(|s| s.as_str()) == Some(name);
+        
+        // Card styling for results (different color scheme)
+        let card_color = if is_selected {
+            egui::Color32::from_rgb(85, 45, 135) // Purple for selected result
+        } else {
+            egui::Color32::from_rgb(45, 45, 55) // Darker background for results
+        };
+        
+        let border_color = if is_selected {
+            egui::Color32::from_rgb(105, 65, 155) // Brighter purple border
+        } else {
+            egui::Color32::from_rgb(65, 65, 75) // Subtle border for results
+        };
+
+        let card_response = egui::Frame::none()
+            .fill(card_color)
+            .stroke(egui::Stroke::new(if is_selected { 2.0 } else { 1.0 }, border_color))
+            .rounding(6.0)
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                let response = ui.interact(ui.available_rect_before_wrap(), egui::Id::new(format!("result_card_{}", name)), egui::Sense::click());
+                
+                ui.horizontal(|ui| {
+                    // Result icon and info
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("📊"); // Calculator icon for results
+                            ui.strong(name);
+                        });
+                        ui.horizontal(|ui| {
+                            match result {
+                                OperationResult::Matrix(matrix) => {
+                                    let (rows, cols) = matrix.dimensions();
+                                    ui.label(format!("📐 {}×{}", rows, cols));
+                                    ui.separator();
+                                    ui.label(format!("📋 {} elements", rows * cols));
+                                }
+                                OperationResult::Scalar(value) => {
+                                    ui.label("🔢 Scalar");
+                                    ui.separator();
+                                    ui.label(format!("≈ {:.3}", value));
+                                }
+                                OperationResult::Vector(vec) => {
+                                    ui.label("📏 Vector");
+                                    ui.separator();
+                                    ui.label(format!("[{}]", vec.len()));
+                                }
+                                _ => {
+                                    ui.label("📄 Result");
+                                }
+                            }
+                        });
+                    });
+                    
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Delete button for results
+                        if ui.button("🗑️").on_hover_text("Delete result").clicked() {
+                            // Mark for deletion (we'll handle this after the loop)
+                        }
+                    });
+                });
+
+                // Handle clicks
+                if response.clicked() {
+                    self.selected_result = Some(name.to_string());
+                    self.selected_matrix = None; // Clear matrix selection
+                }
+                
+                response
+            });
+        
+        ui.add_space(4.0);
+    }
+    
+    fn render_selected_result(&mut self, ui: &mut egui::Ui, result_name: &str) {
+        // Find and clone the result to avoid borrowing issues
+        let result = self.operation_results.iter()
+            .find(|(name, _)| name == result_name)
+            .map(|(_, result)| result.clone());
+            
+        if let Some(result) = result {
+            ui.heading(format!("Result: {}", result_name));
+            ui.separator();
+            
+            match result {
+                OperationResult::Matrix(matrix) => {
+                    let (rows, cols) = matrix.dimensions();
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Size: {}×{}", rows, cols));
+                        ui.label(format!("Type: Matrix Result"));
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    // Action buttons
+                    ui.horizontal(|ui| {
+                        if ui.button("📁 Add to Project").clicked() {
+                            let new_name = format!("result_{}", self.project.matrices.len() + 1);
+                            let mut new_matrix = matrix.clone();
+                            new_matrix.name = new_name.clone();
+                            let final_name = new_name.clone();
+                            self.project.matrices.insert(final_name.clone(), new_matrix);
+                            self.selected_matrix = Some(final_name.clone());
+                            self.selected_result = None;
+                            self.success_message = Some(format!("Added result as matrix: {}", final_name));
+                        }
+                        
+                        if ui.button("📋 Copy Values").clicked() {
+                            // Could implement clipboard functionality here
+                            self.success_message = Some("Matrix values copied to clipboard".to_string());
+                        }
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    // Display the full matrix (read-only)
+                    egui::ScrollArea::both()
+                        .max_height(400.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new(format!("result_matrix_{}", result_name))
+                                .striped(true)
+                                .spacing([4.0, 2.0])
+                                .show(ui, |ui| {
+                                    // Column headers
+                                    ui.label("");
+                                    for j in 0..cols {
+                                        ui.strong(format!("C{}", j));
+                                    }
+                                    ui.end_row();
+                                    
+                                    // Matrix data with row headers
+                                    for i in 0..rows {
+                                        ui.strong(format!("R{}", i));
+                                        for j in 0..cols {
+                                            if let Some(value) = matrix.get(i, j) {
+                                                ui.label(format!("{:.6}", value));
+                                            } else {
+                                                ui.label("N/A");
+                                            }
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                }
+                OperationResult::Scalar(value) => {
+                    ui.horizontal(|ui| {
+                        ui.label("Type: Scalar Result");
+                        ui.label(format!("Value: {:.10}", value));
+                    });
+                    
+                    ui.add_space(20.0);
+                    
+                    // Large display of the scalar value
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(50.0);
+                        ui.heading(format!("{:.10}", value));
+                        ui.add_space(50.0);
+                    });
+                }
+                OperationResult::Vector(vec) => {
+                    ui.horizontal(|ui| {
+                        ui.label("Type: Vector Result");
+                        ui.label(format!("Length: {}", vec.len()));
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    // Display vector elements
+                    egui::ScrollArea::vertical()
+                        .max_height(400.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new(format!("result_vector_{}", result_name))
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.strong("Index");
+                                    ui.strong("Value");
+                                    ui.end_row();
+                                    
+                                    for (i, value) in vec.iter().enumerate() {
+                                        ui.label(format!("{}", i));
+                                        ui.label(format!("{:.6}", value));
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                }
+                _ => {
+                    ui.label("Unsupported result type");
+                }
+            }
+        } else {
+            ui.label("Result not found");
+            self.selected_result = None;
+        }
     }
 
     fn render_matrix_context_menu(&mut self, ui: &mut egui::Ui, matrix_name: &str) {
