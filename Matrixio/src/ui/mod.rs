@@ -33,6 +33,12 @@ pub struct MatrixioApp {
         std::collections::HashMap<String, std::collections::HashMap<(usize, usize), String>>,
     editing_element: Option<(String, usize, usize)>, // matrix_name, row, col
 
+    // Large matrix viewport state
+    viewport_offset: std::collections::HashMap<String, (usize, usize)>, // (row_offset, col_offset) per matrix
+    viewport_size: (usize, usize), // (visible_rows, visible_cols)
+    zoom_level: f32, // Cell size multiplier
+    show_matrix_stats: bool,
+
     // Modal states
     show_about: bool,
 
@@ -73,6 +79,10 @@ impl MatrixioApp {
             matrix_name_input: String::new(),
             matrix_element_texts: std::collections::HashMap::new(),
             editing_element: None,
+            viewport_offset: std::collections::HashMap::new(),
+            viewport_size: (20, 20), // Default 20x20 viewport
+            zoom_level: 1.0,
+            show_matrix_stats: true,
             show_about: false,
             success_message: None,
             error_message: None,
@@ -607,61 +617,188 @@ impl MatrixioApp {
         rows: usize,
         cols: usize,
     ) {
-        ui.label("📋 Scrollable view - scroll to see more cells");
-        ui.label(format!(
-            "Showing visible portion of {}×{} matrix",
-            rows, cols
-        ));
+        // Matrix info header
+        ui.horizontal(|ui| {
+            ui.heading("🔍 Large Matrix Viewer");
+            ui.separator();
+            ui.label(format!("� Dimensions: {}×{}", rows, cols));
+        });
         ui.add_space(5.0);
 
-        // Scrollable area for large matrices
+        // Viewport controls
+        self.render_viewport_controls(ui, matrix_name, rows, cols);
+        ui.add_space(5.0);
+
+        // Matrix summary statistics (if enabled)
+        if self.show_matrix_stats {
+            self.render_matrix_statistics(ui, matrix_name);
+            ui.add_space(5.0);
+        }
+
+        // Get viewport offset for this matrix
+        let offset = *self.viewport_offset.get(matrix_name).unwrap_or(&(0, 0));
+        let (row_offset, col_offset) = offset;
+        let (viewport_rows, viewport_cols) = self.viewport_size;
+
+        // Calculate visible range
+        let visible_row_end = (row_offset + viewport_rows).min(rows);
+        let visible_col_end = (col_offset + viewport_cols).min(cols);
+        
+        ui.label(format!(
+            "📋 Viewport: Rows {}-{}, Cols {}-{}",
+            row_offset,
+            visible_row_end.saturating_sub(1),
+            col_offset,
+            visible_col_end.saturating_sub(1)
+        ));
+        ui.add_space(3.0);
+
+        // Calculate cell size based on zoom
+        let base_cell_width = 65.0;
+        let cell_width = base_cell_width * self.zoom_level;
+        let cell_spacing = 2.0 * self.zoom_level;
+
+        // Optimized viewport rendering
         egui::ScrollArea::both()
-            .max_height(400.0)
-            .max_width(600.0)
+            .max_height(500.0)
+            .max_width(800.0)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                egui::Grid::new(format!("large_matrix_grid_{}", matrix_name))
+                egui::Grid::new(format!("large_matrix_viewport_{}", matrix_name))
                     .striped(true)
-                    .spacing([3.0, 3.0])
-                    .min_col_width(70.0)
+                    .spacing([cell_spacing, cell_spacing])
+                    .min_col_width(cell_width)
                     .show(ui, |ui| {
-                        // Header row with column indices (show more columns for scrolling)
+                        // Header row with column indices
                         ui.label(""); // Empty corner
-                        for j in 0..cols.min(50) {
-                            // Limit to 50 columns for performance
+                        for j in col_offset..visible_col_end {
                             ui.label(format!("C{}", j));
-                        }
-                        if cols > 50 {
-                            ui.label("...");
                         }
                         ui.end_row();
 
-                        // Matrix rows (show more rows for scrolling)
-                        for i in 0..rows.min(100) {
-                            // Limit to 100 rows for performance
+                        // Matrix rows within viewport
+                        for i in row_offset..visible_row_end {
                             // Row index
                             ui.label(format!("R{}", i));
-
+                            
                             // Matrix elements
-                            for j in 0..cols.min(50) {
+                            for j in col_offset..visible_col_end {
                                 self.render_matrix_cell(ui, matrix_name, i, j, false);
-                            }
-
-                            if cols > 50 {
-                                ui.label("...");
-                            }
-                            ui.end_row();
-                        }
-
-                        if rows > 100 {
-                            ui.label("...");
-                            for _ in 0..cols.min(50) {
-                                ui.label("...");
                             }
                             ui.end_row();
                         }
                     });
             });
+    }
+
+    fn render_viewport_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        matrix_name: &str,
+        rows: usize,
+        cols: usize,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label("🎛️ Viewport Controls:");
+            
+            // Get current offset
+            let offset = *self.viewport_offset.get(matrix_name).unwrap_or(&(0, 0));
+            let (mut row_offset, mut col_offset) = offset;
+            let (viewport_rows, viewport_cols) = self.viewport_size;
+            
+            // Navigation buttons
+            if ui.button("⬅️").clicked() {
+                col_offset = col_offset.saturating_sub(viewport_cols / 2);
+            }
+            if ui.button("➡️").clicked() {
+                col_offset = (col_offset + viewport_cols / 2).min(cols.saturating_sub(viewport_cols));
+            }
+            if ui.button("⬆️").clicked() {
+                row_offset = row_offset.saturating_sub(viewport_rows / 2);
+            }
+            if ui.button("⬇️").clicked() {
+                row_offset = (row_offset + viewport_rows / 2).min(rows.saturating_sub(viewport_rows));
+            }
+            
+            ui.separator();
+            
+            // Home button
+            if ui.button("🏠 Home").clicked() {
+                row_offset = 0;
+                col_offset = 0;
+            }
+            
+            ui.separator();
+            
+            // Zoom controls
+            ui.label("🔍 Zoom:");
+            if ui.button("➕").clicked() {
+                self.zoom_level = (self.zoom_level * 1.2).min(3.0);
+            }
+            if ui.button("➖").clicked() {
+                self.zoom_level = (self.zoom_level / 1.2).max(0.5);
+            }
+            ui.label(format!("{:.1}x", self.zoom_level));
+            
+            // Update offset
+            self.viewport_offset.insert(matrix_name.to_string(), (row_offset, col_offset));
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("📐 Viewport Size:");
+            let (mut vp_rows, mut vp_cols) = self.viewport_size;
+            
+            ui.add(egui::DragValue::new(&mut vp_rows)
+                .speed(1.0)
+                .range(5..=50)
+                .prefix("Rows: "));
+            ui.add(egui::DragValue::new(&mut vp_cols)
+                .speed(1.0)
+                .range(5..=50)
+                .prefix("Cols: "));
+                
+            self.viewport_size = (vp_rows, vp_cols);
+            
+            ui.separator();
+            ui.checkbox(&mut self.show_matrix_stats, "📊 Show Statistics");
+        });
+    }
+
+    fn render_matrix_statistics(&self, ui: &mut egui::Ui, matrix_name: &str) {
+        if let Some(matrix) = self.project.matrices.get(matrix_name) {
+            let (rows, cols) = matrix.dimensions();
+            
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("📊 Matrix Statistics:");
+                    
+                    // Calculate basic statistics
+                    let mut values = Vec::new();
+                    for i in 0..rows {
+                        for j in 0..cols {
+                            if let Some(val) = matrix.get(i, j) {
+                                values.push(val);
+                            }
+                        }
+                    }
+                    
+                    if !values.is_empty() {
+                        let sum: f64 = values.iter().sum();
+                        let mean = sum / values.len() as f64;
+                        let min = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                        let max = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                        
+                        ui.label(format!("📈 Mean: {:.3}", mean));
+                        ui.separator();
+                        ui.label(format!("📉 Min: {:.3}", min));
+                        ui.separator();
+                        ui.label(format!("📊 Max: {:.3}", max));
+                        ui.separator();
+                        ui.label(format!("🔢 Elements: {}", values.len()));
+                    }
+                });
+            });
+        }
     }
 
     fn render_matrix_cell(
